@@ -12,7 +12,10 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
 
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MoE
+try:
+    from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MoE
+except ImportError:
+    from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2Moe as DeepseekV2MoE
 from transformers.models.olmoe.modeling_olmoe import OlmoeSparseMoeBlock
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
