@@ -65,6 +65,10 @@ def run_gemq_solver(args):
         extra_constr=args.extra_constr, # NOTE: this args is valid only when using x_space=(1,2,3)
         start_layer_idx=m.first_k_dense_layers,
         backend=args.ilp_backend,
+        fixed_expert_bits=(
+            {m.num_routed_experts_per_layer: max(bit_cands)}
+            if args.model_name == "Qwen/Qwen1.5-MoE-A2.7B" else None
+        ),
     )
     opt_set = global_solver.solve_all(total_bits=total_bits)
 

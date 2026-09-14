@@ -4,18 +4,32 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import load_dataset
+from datasets import DatasetDict, load_dataset, load_from_disk
 
 from gemq.utils.model_utils import get_blocks, move_embed, move_head
 
 
-def get_testenc(tokenizer, dataset, seqlen):
+def _load_eval_split(dataset_root, dataset, split):
+    if dataset_root is None:
+        return None
+
+    names = {"c4": "c4_gptq_new_seed0", "wikitext2": "wikitext2"}
+    dataset_dir = f"{dataset_root}/{names[dataset]}"
+    loaded = load_from_disk(dataset_dir)
+    return loaded[split] if isinstance(loaded, DatasetDict) else loaded
+
+
+def get_testenc(tokenizer, dataset, seqlen, dataset_root=None):
     if dataset == "wikitext2":
-        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        testdata = _load_eval_split(dataset_root, dataset, "test")
+        if testdata is None:
+            testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
 
     elif dataset == "c4":
-        testdata = load_dataset("allenai/c4", data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"}, split="validation")
+        testdata = _load_eval_split(dataset_root, dataset, "validation")
+        if testdata is None:
+            testdata = load_dataset("allenai/c4", data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"}, split="validation")
         testenc = tokenizer(" ".join(testdata[:1100]["text"]), return_tensors="pt")
         testenc = testenc.input_ids[:, :(256 * seqlen)]
 
@@ -133,7 +147,7 @@ def compute_perplexity_offload(model, model_name, input_ids, dataset_name):
 
 
 @torch.inference_mode()
-def evaluate_perplexity(model, tokenizer, datasets, model_name, offload=True):
+def evaluate_perplexity(model, tokenizer, datasets, model_name, offload=True, dataset_root=None):
     """
     Evaluate the model on a given dataset.
     """
@@ -143,7 +157,7 @@ def evaluate_perplexity(model, tokenizer, datasets, model_name, offload=True):
 
     # for each dataset
     for dataset in datasets:
-        testenc = get_testenc(tokenizer, dataset, model.seqlen)
+        testenc = get_testenc(tokenizer, dataset, model.seqlen, dataset_root)
         if offload:
             ppl = compute_perplexity_offload(model, model_name, testenc.input_ids, dataset)
         else:

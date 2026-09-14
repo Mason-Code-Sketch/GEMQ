@@ -1,5 +1,6 @@
 import itertools
 import json
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -8,7 +9,7 @@ from torch.utils.data import DataLoader
 import transformers
 from transformers import AutoTokenizer, default_data_collator
 from transformers.testing_utils import CaptureLogger
-from datasets import load_dataset, Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 
 from gemq.utils.model_utils import NAME_TO_MODEL, ModelType
 
@@ -18,9 +19,34 @@ def set_seed(seed):
     torch.random.manual_seed(seed)
 
 
-def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False):
-    traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+def _load_split(dataset_root, dataset_name, split):
+    """Load a split from an optional local DatasetDict directory."""
+    if dataset_root is None:
+        return None
+
+    paths = {
+        "c4": "c4_gptq_new_seed0",
+        "wikitext2": "wikitext2",
+    }
+    try:
+        dataset_dir = Path(dataset_root) / paths[dataset_name]
+    except KeyError as error:
+        raise ValueError(f"Local dataset {dataset_name!r} is not supported.") from error
+    if not dataset_dir.is_dir():
+        raise FileNotFoundError(f"Local {dataset_name} dataset not found: {dataset_dir}")
+
+    dataset = load_from_disk(str(dataset_dir))
+    if isinstance(dataset, DatasetDict):
+        return dataset[split]
+    return dataset
+
+
+def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None):
+    traindata = _load_split(dataset_root, "wikitext2", "train")
+    testdata = _load_split(dataset_root, "wikitext2", "test")
+    if traindata is None:
+        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=use_fast)
     trainenc = tokenizer(" ".join(traindata["text"]), return_tensors="pt")
@@ -39,13 +65,16 @@ def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False):
     return trainloader, testenc
 
 
-def get_c4_new(nsamples, seed, seqlen, model, use_fast=False):
-    traindata = load_dataset(
-        "allenai/c4", data_files={"train": "en/c4-train.00000-of-01024.json.gz"}, split="train"
-    )
-    valdata = load_dataset(
-        "allenai/c4", data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"}, split="validation"
-    )
+def get_c4_new(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None):
+    traindata = _load_split(dataset_root, "c4", "train")
+    valdata = _load_split(dataset_root, "c4", "validation")
+    if traindata is None:
+        traindata = load_dataset(
+            "allenai/c4", data_files={"train": "en/c4-train.00000-of-01024.json.gz"}, split="train"
+        )
+        valdata = load_dataset(
+            "allenai/c4", data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"}, split="validation"
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=use_fast)
 
@@ -76,20 +105,30 @@ def get_c4_new(nsamples, seed, seqlen, model, use_fast=False):
     return trainloader, valenc
 
 
-def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model="", use_fast=False):
+def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model="", use_fast=False, dataset_root=None):
     if "wikitext2" in name:
-        return get_wikitext2(nsamples, seed, seqlen, model, use_fast)
+        return get_wikitext2(nsamples, seed, seqlen, model, use_fast, dataset_root)
     if "c4" in name:
-        return get_c4_new(nsamples, seed, seqlen, model, use_fast)
+        return get_c4_new(nsamples, seed, seqlen, model, use_fast, dataset_root)
 
 
-def build_calib_loader(dataset: str, tokenizer, max_block_size: int, n_blocks_for_stat: int, batch_size: int, num_workers: int, seed: int = 41):
+def build_calib_loader(
+    dataset: str,
+    tokenizer,
+    max_block_size: int,
+    n_blocks_for_stat: int,
+    batch_size: int,
+    num_workers: int,
+    seed: int = 41,
+    dataset_root=None,
+):
     DATASETS = {
         "c4": lambda: load_dataset("json", data_files={"train": "data/c4-train.00000-of-01024.json"}),
         "math": lambda: load_dataset("json", data_files={"train": "data/math_pretrain_style.json"}),
     }
     
-    all_set = DATASETS[dataset]()
+    local_train = _load_split(dataset_root, dataset, "train") if dataset == "c4" else None
+    all_set = DatasetDict({"train": local_train}) if local_train is not None else DATASETS[dataset]()
 
     block_size = tokenizer.model_max_length
     if block_size > max_block_size:
@@ -179,7 +218,8 @@ def get_calib_loader(tokenizer, args):
             args.seed,
             seqlen=args.seqlen,
             model=args.model, # model dir
-            use_fast=args.use_fast
+            use_fast=args.use_fast,
+            dataset_root=getattr(args, "dataset_root", None),
         )
 
     elif args.calib_dataset in ["c4", "math"]:
@@ -190,7 +230,8 @@ def get_calib_loader(tokenizer, args):
             args.nsamples,
             args.batch_size,
             num_workers=4,
-            seed=args.seed
+            seed=args.seed,
+            dataset_root=getattr(args, "dataset_root", None),
         )
         # unify the dataloader format
         calib_loader = []
@@ -209,7 +250,8 @@ def get_calib_loader(tokenizer, args):
                 args.nsamples,
                 args.batch_size,
                 num_workers=4,
-                seed=args.seed
+                seed=args.seed,
+                dataset_root=getattr(args, "dataset_root", None),
             )
             # unify the dataloader format
             for i, batch in enumerate(loader):

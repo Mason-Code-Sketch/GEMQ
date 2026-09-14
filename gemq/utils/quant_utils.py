@@ -47,6 +47,10 @@ def build_alloc_cfg(model, args):
                     layer_bit_cfg[name] = expert_bit_cfg[i][expert_id]
                 else:
                     layer_bit_cfg[name] = args.expert_wbits
+            else:
+                # Keep non-quantized auxiliary linears, such as Qwen1.5's shared
+                # expert gate, in full precision.
+                layer_bit_cfg[name] = 16
         bit_cfg.append(layer_bit_cfg)
 
     return bit_cfg

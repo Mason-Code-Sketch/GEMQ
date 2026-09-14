@@ -4,10 +4,12 @@ import time
 import math
 import gc
 import json
+import pickle
 from functools import partial
 from tqdm import tqdm
 
 import torch
+import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, logging
 from hqq.models.hf.base import AutoHQQHFModel
 
@@ -19,6 +21,88 @@ from gemq.utils.eval_utils import evaluate_perplexity, run_lm_eval
 from gemq.utils.hf_loading import align_deepseek_softmax_scale
 
 logging.set_verbosity_error()
+
+
+def _make_gptq_quantizer(weight, name, wbits, args):
+    hidden_size = weight.shape[1]
+    if hidden_size % args.groupsize == 0:
+        groupsize = args.groupsize
+    else:
+        assert hidden_size % 64 == 0, "Currently only supports groupsize=64 as fallback."
+        groupsize = 64
+        if args.verbose:
+            print(f"Forcing groupsize from {args.groupsize} to 64 for module: {name}")
+
+    quantizer_cls = MCMoeGPTQWeightQuantizer if args.reproduce_mcmoe else GPTQWeightQuantizer
+    return quantizer_cls(
+        weight,
+        name,
+        wbits,
+        args.blocksize,
+        args.percdamp,
+        groupsize,
+        args.actorder,
+        args.static_groups,
+        args.mse,
+    )
+
+
+def _get_qwen2_expert_bits(args, allocation, layer_idx):
+    if not args.mixed:
+        return [args.expert_wbits] * 61
+    return [allocation[layer_idx][expert_id] for expert_id in range(61)]
+
+
+def _build_qwen2_expert_quantizers(moe_block, expert_bits, args):
+    quantizers = {}
+    for expert_id, bitwidth in enumerate(expert_bits[:-1]):
+        if bitwidth >= 16:
+            continue
+        quantizers[expert_id] = {
+            "gate_up_proj": _make_gptq_quantizer(
+                moe_block.experts.gate_up_proj[expert_id],
+                f"mlp.experts.{expert_id}.gate_up_proj",
+                bitwidth,
+                args,
+            ),
+            "down_proj": _make_gptq_quantizer(
+                moe_block.experts.down_proj[expert_id],
+                f"mlp.experts.{expert_id}.down_proj",
+                bitwidth,
+                args,
+            ),
+        }
+    return quantizers
+
+
+def _collect_qwen2_expert_hessians(moe_block, inputs, quantizers):
+    hidden_states = inputs[0].detach().reshape(-1, inputs[0].shape[-1])
+    _, _, selected_experts = moe_block.gate(hidden_states)
+    for expert_id, expert_quantizers in quantizers.items():
+        token_indices = (selected_experts == expert_id).nonzero(as_tuple=True)[0]
+        if token_indices.numel() == 0:
+            continue
+        expert_inputs = hidden_states[token_indices]
+        expert_quantizers["gate_up_proj"].add_batch(expert_inputs)
+        gate, up = F.linear(
+            expert_inputs, moe_block.experts.gate_up_proj[expert_id]
+        ).chunk(2, dim=-1)
+        expert_activations = moe_block.experts.act_fn(gate) * up
+        expert_quantizers["down_proj"].add_batch(expert_activations)
+
+
+@torch.no_grad()
+def _quantize_qwen2_expert_weights(moe_block, quantizers, args):
+    for expert_id, expert_quantizers in quantizers.items():
+        for projection_name, quantizer in expert_quantizers.items():
+            quantized, scales, zeros = quantizer.quantize()
+            dequantized = quantizer.dequantize(quantized, scales, zeros)
+            getattr(moe_block.experts, projection_name)[expert_id].copy_(dequantized)
+            if args.verbose:
+                print(
+                    f"| mlp.experts.{expert_id}.{projection_name:<15} | "
+                    f"{quantizer.nbits:<3} | {quantizer.groupsize:>4} | {'fused':>9} |"
+                )
 
 
 def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
@@ -125,6 +209,11 @@ def quantize_weights_gptq(model, dataloader, args):
 
     # build a bit allocation config for each Linear module
     bit_cfg = build_alloc_cfg(model, args)
+    model_type = NAME_TO_MODEL[args.model_name]
+    qwen2_allocation = None
+    if model_type == ModelType.QWEN2MOE and args.mixed:
+        with open(args.bit_cfg, "rb") as file:
+            qwen2_allocation = pickle.load(file)
 
     # prepare decoder inputs and kwargs for model forward
     inps, layer_kwargs = compute_decoder_inputs(model, dataloader, args.model_name, "cuda")
@@ -145,6 +234,7 @@ def quantize_weights_gptq(model, dataloader, args):
         # retrieve linear modules in the current block
         layer = layers[i].to("cuda")
         named_linears = get_named_linears(layer)
+        moe_block = get_moe_block(layer, args.model_name) if model_type == ModelType.QWEN2MOE else None
 
         # create a quantizer for each linear module that requires quantization
         quantizers = {}
@@ -155,26 +245,7 @@ def quantize_weights_gptq(model, dataloader, args):
             if wbits >= 16:
                 continue
 
-            # NOTE: adjust groupsize to fit the hidden size
-            hidden_size = m.weight.shape[1]
-            if hidden_size % args.groupsize == 0:
-                groupsize = args.groupsize
-            else:
-                assert hidden_size % 64 == 0, "Currently only supports groupsize=64 as fallback."
-                groupsize = 64
-                if args.verbose:
-                    print(f"Forcing groupsize from {args.groupsize} to 64 for module: {name}")
-
-            if args.reproduce_mcmoe:
-                quantizers[name] = MCMoeGPTQWeightQuantizer(
-                    m.weight.data, name, wbits, args.blocksize, args.percdamp,
-                    groupsize, args.actorder, args.static_groups, args.mse
-                )
-            else:
-                quantizers[name] = GPTQWeightQuantizer(
-                    m.weight.data, name, wbits, args.blocksize, args.percdamp,
-                    groupsize, args.actorder, args.static_groups, args.mse
-                )
+            quantizers[name] = _make_gptq_quantizer(m.weight.data, name, wbits, args)
             
             # collect quantized modules for real quantization saving
             quant_modules[f"{i}.{name}"] = m
@@ -193,10 +264,23 @@ def quantize_weights_gptq(model, dataloader, args):
                     partial(update_hessian_hook, quantizer=quantizers[name])
                 )
             )
+        qwen2_quantizers = None
+        qwen2_handle = None
+        if model_type == ModelType.QWEN2MOE:
+            qwen2_quantizers = _build_qwen2_expert_quantizers(
+                moe_block,
+                _get_qwen2_expert_bits(args, qwen2_allocation, i),
+                args,
+            )
+            qwen2_handle = moe_block.register_forward_pre_hook(
+                partial(_collect_qwen2_expert_hessians, quantizers=qwen2_quantizers)
+            )
         for j in range(args.nsamples):
             outs[j] = layer(inps[j: j+1], **layer_kwargs)[0]
         for h in handles:
             h.remove()
+        if qwen2_handle is not None:
+            qwen2_handle.remove()
 
         elapse = time.time() - start
         if args.verbose:
@@ -225,6 +309,9 @@ def quantize_weights_gptq(model, dataloader, args):
             elapse = time.time() - start
             if args.verbose:
                 print(f"| {name:<30} | {quantizers[name].nbits:<3} | {quantizers[name].groupsize:>4} | {elapse:>9.2f} |")
+
+        if qwen2_quantizers is not None:
+            _quantize_qwen2_expert_weights(moe_block, qwen2_quantizers, args)
 
         # compute layer outputs using quantized weights
         start = time.time()
@@ -293,6 +380,10 @@ def parse_args():
     parser.add_argument(
         "--calib_dataset", type=str, default="wikitext2",
         help="Which calibration dataset to use",
+    )
+    parser.add_argument(
+        "--dataset_root", type=str, default=None,
+        help="Optional directory containing local c4_gptq_new_seed0 and wikitext2 DatasetDicts",
     )
     parser.add_argument(
         "--nsamples", type=int, default=128,
@@ -439,6 +530,9 @@ if __name__ == "__main__":
     args = parse_args()
     print(json.dumps(vars(args), indent=4))
 
+    if args.real_quant and NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE:
+        raise ValueError("Qwen1.5-MoE-A2.7B currently supports fake quantization only.")
+
     # load pre-trained model
     print("Loading model ...")
     tokenizer = AutoTokenizer.from_pretrained(
@@ -474,7 +568,7 @@ if __name__ == "__main__":
         model = dispatch_model_to_all_devices(model)
         
         print("Evaluating quantized model before fine-tuning ...")
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False)
+        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root)
 
         print("Fine-tuning routers ...")
         finetune_routers(model, dataloader, args)
@@ -487,7 +581,7 @@ if __name__ == "__main__":
         if not args.finetune_routers:
             model = dispatch_model_to_all_devices(model)
 
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False)
+        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root)
         if args.eval_downstream:
             if args.disable_cache:
                 model.config.use_cache = False
@@ -500,7 +594,7 @@ if __name__ == "__main__":
                 print("Downstream evaluation failed. Skipping ...")
     else:
         # memory-efficient evaluation with layer offloading
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=True)
+        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=True, dataset_root=args.dataset_root)
 
     # save model
     if args.save_path:
