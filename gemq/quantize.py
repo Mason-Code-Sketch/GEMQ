@@ -346,7 +346,7 @@ def quantize_weights_gptq(model, dataloader, args):
             qwen2_handle = moe_block.register_forward_pre_hook(
                 partial(_collect_qwen2_expert_hessians, quantizers=qwen2_quantizers)
             )
-        elif model_type == ModelType.DEEPSEEKV2:
+        elif model_type == ModelType.DEEPSEEKV2 and hasattr(moe_block, "experts"):
             deepseekv2_quantizers = _build_deepseekv2_expert_quantizers(
                 moe_block,
                 _get_deepseekv2_expert_bits(args, deepseekv2_allocation, i),
