@@ -321,6 +321,69 @@ def compute_qwen2_moe_layer_reconstruction_errors(
 
 
 @torch.inference_mode()
+def compute_deepseekv2_moe_layer_reconstruction_errors(
+    moe_block,
+    block_inps,
+    block_outs,
+    layer_sq_grads,
+    bit_cfg,
+    forward_batch_size,
+):
+    """Evaluate RTN expert candidates on DeepSeek-V2's fused routed experts."""
+    layer_quant_loss = defaultdict(dict)
+    num_routed_experts = moe_block.experts.num_experts
+
+    for expert_id in range(num_routed_experts + 1):
+        if expert_id == num_routed_experts:
+            modules = [
+                moe_block.shared_experts.gate_proj,
+                moe_block.shared_experts.up_proj,
+                moe_block.shared_experts.down_proj,
+            ]
+            original_weights = [module.weight.detach().clone() for module in modules]
+        else:
+            original_weights = [
+                moe_block.experts.gate_up_proj[expert_id].detach().clone(),
+                moe_block.experts.down_proj[expert_id].detach().clone(),
+            ]
+
+        for bitwidth in bit_cfg:
+            if expert_id == num_routed_experts:
+                quantized_weights = [
+                    MCMoeRTNWeightQuantizer(weight, nbits=bitwidth).quantize()
+                    for weight in original_weights
+                ]
+                for module, quantized_weight in zip(modules, quantized_weights):
+                    module.weight.copy_(quantized_weight)
+            else:
+                moe_block.experts.gate_up_proj[expert_id].copy_(
+                    MCMoeRTNWeightQuantizer(original_weights[0], nbits=bitwidth).quantize()
+                )
+                moe_block.experts.down_proj[expert_id].copy_(
+                    MCMoeRTNWeightQuantizer(original_weights[1], nbits=bitwidth).quantize()
+                )
+
+            loss = 0.0
+            for start in range(0, block_inps.shape[0], forward_batch_size):
+                end = start + forward_batch_size
+                quant_block_outs = moe_block(block_inps[start:end])
+                loss += (
+                    layer_sq_grads[start:end]
+                    * (block_outs[start:end].double() - quant_block_outs.double()).pow(2)
+                ).sum().item()
+            layer_quant_loss[expert_id][bitwidth] = loss
+
+            if expert_id == num_routed_experts:
+                for module, original_weight in zip(modules, original_weights):
+                    module.weight.copy_(original_weight)
+            else:
+                moe_block.experts.gate_up_proj[expert_id].copy_(original_weights[0])
+                moe_block.experts.down_proj[expert_id].copy_(original_weights[1])
+
+    return layer_quant_loss
+
+
+@torch.inference_mode()
 def compute_faster_layer_re(model, dataloader, args):
     """
     Compute layer reconstruction errors (perturbations) caused by quantization of
@@ -427,6 +490,22 @@ def compute_faster_layer_re(model, dataloader, args):
             bit_cfg = list(map(int, args.wbits.split(",")))
             layer_sq_grads = layer_output_grads[i].squeeze(1).double().pow(2).to("cuda")
             quant_loss[i] = compute_qwen2_moe_layer_reconstruction_errors(
+                moe_block,
+                block_inps,
+                block_outs,
+                layer_sq_grads,
+                bit_cfg,
+                fwd_bsz,
+            )
+            inps, outs = outs, inps
+            layers[i] = layer.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+            continue
+        if model_type == ModelType.DEEPSEEKV2:
+            bit_cfg = list(map(int, args.wbits.split(",")))
+            layer_sq_grads = layer_output_grads[i].squeeze(1).double().pow(2).to("cuda")
+            quant_loss[i] = compute_deepseekv2_moe_layer_reconstruction_errors(
                 moe_block,
                 block_inps,
                 block_outs,

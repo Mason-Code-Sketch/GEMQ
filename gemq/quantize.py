@@ -53,7 +53,35 @@ def _get_qwen2_expert_bits(args, allocation, layer_idx):
     return [allocation[layer_idx][expert_id] for expert_id in range(61)]
 
 
+def _get_deepseekv2_expert_bits(args, allocation, layer_idx):
+    if not args.mixed:
+        return [args.expert_wbits] * 65
+    return [allocation[layer_idx][expert_id] for expert_id in range(65)]
+
+
 def _build_qwen2_expert_quantizers(moe_block, expert_bits, args):
+    quantizers = {}
+    for expert_id, bitwidth in enumerate(expert_bits[:-1]):
+        if bitwidth >= 16:
+            continue
+        quantizers[expert_id] = {
+            "gate_up_proj": _make_gptq_quantizer(
+                moe_block.experts.gate_up_proj[expert_id],
+                f"mlp.experts.{expert_id}.gate_up_proj",
+                bitwidth,
+                args,
+            ),
+            "down_proj": _make_gptq_quantizer(
+                moe_block.experts.down_proj[expert_id],
+                f"mlp.experts.{expert_id}.down_proj",
+                bitwidth,
+                args,
+            ),
+        }
+    return quantizers
+
+
+def _build_deepseekv2_expert_quantizers(moe_block, expert_bits, args):
     quantizers = {}
     for expert_id, bitwidth in enumerate(expert_bits[:-1]):
         if bitwidth >= 16:
@@ -91,8 +119,38 @@ def _collect_qwen2_expert_hessians(moe_block, inputs, quantizers):
         expert_quantizers["down_proj"].add_batch(expert_activations)
 
 
+def _collect_deepseekv2_expert_hessians(moe_block, inputs, quantizers):
+    hidden_states = inputs[0].detach().reshape(-1, inputs[0].shape[-1])
+    _, _, selected_experts = moe_block.gate(hidden_states)
+    for expert_id, expert_quantizers in quantizers.items():
+        token_indices = (selected_experts == expert_id).nonzero(as_tuple=True)[0]
+        if token_indices.numel() == 0:
+            continue
+        expert_inputs = hidden_states[token_indices]
+        expert_quantizers["gate_up_proj"].add_batch(expert_inputs)
+        gate, up = F.linear(
+            expert_inputs, moe_block.experts.gate_up_proj[expert_id]
+        ).chunk(2, dim=-1)
+        expert_activations = moe_block.experts.act_fn(gate) * up
+        expert_quantizers["down_proj"].add_batch(expert_activations)
+
+
 @torch.no_grad()
 def _quantize_qwen2_expert_weights(moe_block, quantizers, args):
+    for expert_id, expert_quantizers in quantizers.items():
+        for projection_name, quantizer in expert_quantizers.items():
+            quantized, scales, zeros = quantizer.quantize()
+            dequantized = quantizer.dequantize(quantized, scales, zeros)
+            getattr(moe_block.experts, projection_name)[expert_id].copy_(dequantized)
+            if args.verbose:
+                print(
+                    f"| mlp.experts.{expert_id}.{projection_name:<15} | "
+                    f"{quantizer.nbits:<3} | {quantizer.groupsize:>4} | {'fused':>9} |"
+                )
+
+
+@torch.no_grad()
+def _quantize_deepseekv2_expert_weights(moe_block, quantizers, args):
     for expert_id, expert_quantizers in quantizers.items():
         for projection_name, quantizer in expert_quantizers.items():
             quantized, scales, zeros = quantizer.quantize()
@@ -211,9 +269,14 @@ def quantize_weights_gptq(model, dataloader, args):
     bit_cfg = build_alloc_cfg(model, args)
     model_type = NAME_TO_MODEL[args.model_name]
     qwen2_allocation = None
-    if model_type == ModelType.QWEN2MOE and args.mixed:
+    deepseekv2_allocation = None
+    if model_type in (ModelType.QWEN2MOE, ModelType.DEEPSEEKV2) and args.mixed:
         with open(args.bit_cfg, "rb") as file:
-            qwen2_allocation = pickle.load(file)
+            allocation = pickle.load(file)
+        if model_type == ModelType.QWEN2MOE:
+            qwen2_allocation = allocation
+        else:
+            deepseekv2_allocation = allocation
 
     # prepare decoder inputs and kwargs for model forward
     inps, layer_kwargs = compute_decoder_inputs(model, dataloader, args.model_name, "cuda")
@@ -234,7 +297,11 @@ def quantize_weights_gptq(model, dataloader, args):
         # retrieve linear modules in the current block
         layer = layers[i].to("cuda")
         named_linears = get_named_linears(layer)
-        moe_block = get_moe_block(layer, args.model_name) if model_type == ModelType.QWEN2MOE else None
+        moe_block = (
+            get_moe_block(layer, args.model_name)
+            if model_type in (ModelType.QWEN2MOE, ModelType.DEEPSEEKV2)
+            else None
+        )
 
         # create a quantizer for each linear module that requires quantization
         quantizers = {}
@@ -266,6 +333,8 @@ def quantize_weights_gptq(model, dataloader, args):
             )
         qwen2_quantizers = None
         qwen2_handle = None
+        deepseekv2_quantizers = None
+        deepseekv2_handle = None
         if model_type == ModelType.QWEN2MOE:
             qwen2_quantizers = _build_qwen2_expert_quantizers(
                 moe_block,
@@ -275,12 +344,23 @@ def quantize_weights_gptq(model, dataloader, args):
             qwen2_handle = moe_block.register_forward_pre_hook(
                 partial(_collect_qwen2_expert_hessians, quantizers=qwen2_quantizers)
             )
+        elif model_type == ModelType.DEEPSEEKV2:
+            deepseekv2_quantizers = _build_deepseekv2_expert_quantizers(
+                moe_block,
+                _get_deepseekv2_expert_bits(args, deepseekv2_allocation, i),
+                args,
+            )
+            deepseekv2_handle = moe_block.register_forward_pre_hook(
+                partial(_collect_deepseekv2_expert_hessians, quantizers=deepseekv2_quantizers)
+            )
         for j in range(args.nsamples):
             outs[j] = layer(inps[j: j+1], **layer_kwargs)[0]
         for h in handles:
             h.remove()
         if qwen2_handle is not None:
             qwen2_handle.remove()
+        if deepseekv2_handle is not None:
+            deepseekv2_handle.remove()
 
         elapse = time.time() - start
         if args.verbose:
@@ -312,6 +392,8 @@ def quantize_weights_gptq(model, dataloader, args):
 
         if qwen2_quantizers is not None:
             _quantize_qwen2_expert_weights(moe_block, qwen2_quantizers, args)
+        if deepseekv2_quantizers is not None:
+            _quantize_deepseekv2_expert_weights(moe_block, deepseekv2_quantizers, args)
 
         # compute layer outputs using quantized weights
         start = time.time()
