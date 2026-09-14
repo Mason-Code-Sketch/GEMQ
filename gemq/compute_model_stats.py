@@ -539,6 +539,10 @@ def parse_args():
         "--use_fast", action="store_true",
         help="Whether to use the fast tokenizer implementation",
     )
+    parser.add_argument(
+        "--trust_remote_code", action="store_true",
+        help="Enable the model implementation bundled with the checkpoint",
+    )
     
     # dataset args
     parser.add_argument(
@@ -603,12 +607,16 @@ if __name__ == "__main__":
     print(json.dumps(vars(args), indent=4))
 
     # load pre-trained model
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=args.use_fast)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        use_fast=args.use_fast,
+        trust_remote_code=args.trust_remote_code,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         args.model, device_map=("auto" if args.mode == "layer_grads" else "cpu"),
-        # NOTE: hardcoded True, unlike quantize.py which exposes it as a flag. Either way
-        # align_deepseek_softmax_scale below keeps the two implementations equivalent.
-        torch_dtype=args.model_dtype, attn_implementation=args.attn_impl, trust_remote_code=True,
+        torch_dtype=args.model_dtype,
+        attn_implementation=args.attn_impl,
+        trust_remote_code=args.trust_remote_code,
     )
     # HF's built-in DeepSeek-V2 omits the YaRN mscale on the attention scale; no-op on
     # the official implementation, which already applies it.
