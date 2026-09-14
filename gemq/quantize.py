@@ -496,6 +496,14 @@ def parse_args():
         help="Whether to run evaluation on downstream tasks"
     )
     parser.add_argument(
+        "--skip_pre_finetune_eval", action="store_true",
+        help="Skip the perplexity evaluation immediately before router fine-tuning"
+    )
+    parser.add_argument(
+        "--skip_eval", action="store_true",
+        help="Skip the final perplexity and downstream evaluation"
+    )
+    parser.add_argument(
         "--downstream_tasks", type=str, default="piqa,arc_easy,arc_challenge,hellaswag,winogrande,mathqa,mmlu",
         help="Tasks to evaluate on; ignored if `--eval_downstream` is False"
     )
@@ -566,17 +574,20 @@ if __name__ == "__main__":
     # finetune routers
     if args.finetune_routers:
         model = dispatch_model_to_all_devices(model)
-        
-        print("Evaluating quantized model before fine-tuning ...")
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root)
+
+        if not args.skip_pre_finetune_eval:
+            print("Evaluating quantized model before fine-tuning ...")
+            evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root)
 
         print("Fine-tuning routers ...")
         finetune_routers(model, dataloader, args)
 
     # evaluate model
-    print("Evaluating model ...")
     model.eval()
-    if args.eval_downstream or args.finetune_routers:
+    if args.skip_eval:
+        pass
+    elif args.eval_downstream or args.finetune_routers:
+        print("Evaluating model ...")
         # move all model weights onto gpus and use model() for forwarding
         if not args.finetune_routers:
             model = dispatch_model_to_all_devices(model)
@@ -593,6 +604,7 @@ if __name__ == "__main__":
             except:
                 print("Downstream evaluation failed. Skipping ...")
     else:
+        print("Evaluating model ...")
         # memory-efficient evaluation with layer offloading
         evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=True, dataset_root=args.dataset_root)
 
