@@ -141,7 +141,8 @@ def _quantize_qwen2_expert_weights(moe_block, quantizers, args):
         for projection_name, quantizer in expert_quantizers.items():
             quantized, scales, zeros = quantizer.quantize()
             dequantized = quantizer.dequantize(quantized, scales, zeros)
-            getattr(moe_block.experts, projection_name)[expert_id].copy_(dequantized)
+            weight = getattr(moe_block.experts, projection_name)[expert_id]
+            weight.copy_(dequantized.reshape_as(weight))
             if args.verbose:
                 print(
                     f"| mlp.experts.{expert_id}.{projection_name:<15} | "
@@ -155,7 +156,8 @@ def _quantize_deepseekv2_expert_weights(moe_block, quantizers, args):
         for projection_name, quantizer in expert_quantizers.items():
             quantized, scales, zeros = quantizer.quantize()
             dequantized = quantizer.dequantize(quantized, scales, zeros)
-            getattr(moe_block.experts, projection_name)[expert_id].copy_(dequantized)
+            weight = getattr(moe_block.experts, projection_name)[expert_id]
+            weight.copy_(dequantized.reshape_as(weight))
             if args.verbose:
                 print(
                     f"| mlp.experts.{expert_id}.{projection_name:<15} | "
