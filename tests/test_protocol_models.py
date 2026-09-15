@@ -38,6 +38,16 @@ class ProtocolModelNamesTest(unittest.TestCase):
             self.assertEqual(values["EXPERIMENT_PROTOCOL"], "vivit_ggn")
             self.assertEqual(values["GPTQ_IMPLEMENTATION"], "mcmoe")
 
+    def test_deepseek_protocol_uses_native_bfloat16(self):
+        config_path = Path(__file__).parents[1] / "configs" / "protocol" / "deepseek-v2-lite.env"
+        values = dict(
+            line.split("=", 1)
+            for line in config_path.read_text().splitlines()
+            if line and not line.startswith("#")
+        )
+        self.assertEqual(values["MODEL_DTYPE"], "bfloat16")
+        self.assertEqual(values["SAVE_DTYPE"], "bfloat16")
+
     def test_runner_resolves_asset_root_at_runtime(self):
         runner = (Path(__file__).parents[1] / "scripts" / "run_protocol.sh").read_text()
         self.assertIn("resolve_asset_root", runner)
