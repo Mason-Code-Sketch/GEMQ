@@ -44,7 +44,7 @@ def get_testenc(tokenizer, dataset, seqlen, dataset_root=None):
     return testenc
 
 
-def compute_perplexity(model, input_ids, dataset_name) -> float:
+def compute_perplexity(model, input_ids, dataset_name, *, count_predictions=False) -> float:
     """
     Compute the perplexity of the model on the given dataset.
     """
@@ -57,14 +57,16 @@ def compute_perplexity(model, input_ids, dataset_name) -> float:
         shift_labels = input_ids[:, (i * model.seqlen) : ((i + 1) * model.seqlen)][:, 1:].to(model.device)
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        neg_log_likelihood = loss.float() * model.seqlen
+        token_count = model.seqlen - 1 if count_predictions else model.seqlen
+        neg_log_likelihood = loss.float() * token_count
         nlls.append(neg_log_likelihood)
 
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen)).item()
+    token_count = model.seqlen - 1 if count_predictions else model.seqlen
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * token_count)).item()
     return ppl
 
 
-def compute_perplexity_offload(model, model_name, input_ids, dataset_name):
+def compute_perplexity_offload(model, model_name, input_ids, dataset_name, *, count_predictions=False):
     """
     Compute the perplexity of the model on the given dataset.
     This function uses dynamic weights offloading for memory-efficient evaluation.
@@ -137,9 +139,11 @@ def compute_perplexity_offload(model, model_name, input_ids, dataset_name):
         shift_labels = input_ids[:, (i * model.seqlen) : ((i + 1) * model.seqlen)][:, 1:].to("cuda")
         # loss_fct = nn.CrossEntropyLoss()
         loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        neg_log_likelihood = loss.float() * model.seqlen
+        token_count = model.seqlen - 1 if count_predictions else model.seqlen
+        neg_log_likelihood = loss.float() * token_count
         nlls.append(neg_log_likelihood)
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen)).item()
+    token_count = model.seqlen - 1 if count_predictions else model.seqlen
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * token_count)).item()
 
     model.config.use_cache = use_cache  # restore
 
@@ -147,7 +151,15 @@ def compute_perplexity_offload(model, model_name, input_ids, dataset_name):
 
 
 @torch.inference_mode()
-def evaluate_perplexity(model, tokenizer, datasets, model_name, offload=True, dataset_root=None):
+def evaluate_perplexity(
+    model,
+    tokenizer,
+    datasets,
+    model_name,
+    offload=True,
+    dataset_root=None,
+    count_predictions=False,
+):
     """
     Evaluate the model on a given dataset.
     """
@@ -159,9 +171,15 @@ def evaluate_perplexity(model, tokenizer, datasets, model_name, offload=True, da
     for dataset in datasets:
         testenc = get_testenc(tokenizer, dataset, model.seqlen, dataset_root)
         if offload:
-            ppl = compute_perplexity_offload(model, model_name, testenc.input_ids, dataset)
+            ppl = compute_perplexity_offload(
+                model, model_name, testenc.input_ids, dataset,
+                count_predictions=count_predictions,
+            )
         else:
-            ppl = compute_perplexity(model, testenc.input_ids, dataset)
+            ppl = compute_perplexity(
+                model, testenc.input_ids, dataset,
+                count_predictions=count_predictions,
+            )
         print(f"[{dataset}] ppl: {ppl:.4f}")
 
     # restore

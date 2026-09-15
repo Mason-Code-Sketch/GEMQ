@@ -633,6 +633,10 @@ def parse_args():
         help="Optional directory containing local c4_gptq_new_seed0 and wikitext2 DatasetDicts",
     )
     parser.add_argument(
+        "--experiment_protocol", type=str, default="gemq", choices=["gemq", "vivit_ggn"],
+        help="Calibration protocol; vivit_ggn matches the paired ViViT-GGN runs.",
+    )
+    parser.add_argument(
         "--nsamples", type=int, default=128,
         help="Number of calibration sequences"
     )

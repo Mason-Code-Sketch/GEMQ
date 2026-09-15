@@ -470,6 +470,10 @@ def parse_args():
         help="Optional directory containing local c4_gptq_new_seed0 and wikitext2 DatasetDicts",
     )
     parser.add_argument(
+        "--experiment_protocol", type=str, default="gemq", choices=["gemq", "vivit_ggn"],
+        help="Calibration and PPL protocol; vivit_ggn matches the paired ViViT-GGN runs.",
+    )
+    parser.add_argument(
         "--nsamples", type=int, default=128,
         help="Number of calibration sequences"
     )
@@ -661,7 +665,7 @@ if __name__ == "__main__":
 
         if not args.skip_pre_finetune_eval:
             print("Evaluating quantized model before fine-tuning ...")
-            evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root)
+            evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root, count_predictions=args.experiment_protocol == "vivit_ggn")
 
         print("Fine-tuning routers ...")
         finetune_routers(model, dataloader, args)
@@ -676,7 +680,7 @@ if __name__ == "__main__":
         if not args.finetune_routers:
             model = dispatch_model_to_all_devices(model)
 
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root)
+        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root, count_predictions=args.experiment_protocol == "vivit_ggn")
         if args.eval_downstream:
             if args.disable_cache:
                 model.config.use_cache = False
@@ -690,7 +694,7 @@ if __name__ == "__main__":
     else:
         print("Evaluating model ...")
         # memory-efficient evaluation with layer offloading
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=True, dataset_root=args.dataset_root)
+        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=True, dataset_root=args.dataset_root, count_predictions=args.experiment_protocol == "vivit_ggn")
 
     # save model
     if args.save_path:

@@ -41,7 +41,15 @@ def _load_split(dataset_root, dataset_name, split):
     return dataset
 
 
-def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None):
+def get_wikitext2(
+    nsamples,
+    seed,
+    seqlen,
+    model,
+    use_fast=False,
+    dataset_root=None,
+    experiment_protocol="gemq",
+):
     traindata = _load_split(dataset_root, "wikitext2", "train")
     testdata = _load_split(dataset_root, "wikitext2", "test")
     if traindata is None:
@@ -49,14 +57,29 @@ def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False, dataset_root=No
         testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=use_fast)
-    trainenc = tokenizer(" ".join(traindata["text"]), return_tensors="pt")
+    if experiment_protocol == "vivit_ggn":
+        trainenc = tokenizer(
+            "\n\n".join(traindata["text"]),
+            return_tensors="pt",
+            add_special_tokens=True,
+        )
+    else:
+        trainenc = tokenizer(" ".join(traindata["text"]), return_tensors="pt")
     testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
 
     import random
-    random.seed(seed)
     trainloader = []
-    for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+    if experiment_protocol == "vivit_ggn":
+        available_starts = trainenc.input_ids.shape[1] - seqlen + 1
+        if nsamples > available_starts:
+            raise ValueError(
+                f"nsamples={nsamples} exceeds unique calibration starts={available_starts}"
+            )
+        starts = random.Random(seed).sample(range(available_starts), nsamples)
+    else:
+        random.seed(seed)
+        starts = [random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1) for _ in range(nsamples)]
+    for i in starts:
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -105,9 +128,26 @@ def get_c4_new(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None)
     return trainloader, valenc
 
 
-def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model="", use_fast=False, dataset_root=None):
+def get_loaders(
+    name,
+    nsamples=128,
+    seed=0,
+    seqlen=2048,
+    model="",
+    use_fast=False,
+    dataset_root=None,
+    experiment_protocol="gemq",
+):
     if "wikitext2" in name:
-        return get_wikitext2(nsamples, seed, seqlen, model, use_fast, dataset_root)
+        return get_wikitext2(
+            nsamples,
+            seed,
+            seqlen,
+            model,
+            use_fast,
+            dataset_root,
+            experiment_protocol,
+        )
     if "c4" in name:
         return get_c4_new(nsamples, seed, seqlen, model, use_fast, dataset_root)
 
@@ -220,6 +260,7 @@ def get_calib_loader(tokenizer, args):
             model=args.model, # model dir
             use_fast=args.use_fast,
             dataset_root=getattr(args, "dataset_root", None),
+            experiment_protocol=getattr(args, "experiment_protocol", "gemq"),
         )
 
     elif args.calib_dataset in ["c4", "math"]:
