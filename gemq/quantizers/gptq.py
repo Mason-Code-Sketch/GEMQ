@@ -58,6 +58,10 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         Find quantization parameters (scales zero-points, and max_int) for a tensor.
         """
         x = x.to(self.W.dtype)
+        if self.mse:
+            # Preserve all 101 MSE shrink candidates when the model weights
+            # are BF16 or FP16. Candidate search itself is FP32 arithmetic.
+            x = x.float()
 
         max_int = 2 ** self.nbits - 1
         if max_int == 1:
@@ -84,7 +88,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             p_left  = 1 - tau_range
             p_right = 1 + tau_range
 
-            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=self.W.dtype)  # (N_filters,)
+            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=x.dtype)  # (N_filters,)
             factor_kwargs = {}
             if self.mse_factors_on_device:
                 factor_kwargs = {"device": x.device, "dtype": torch.float32}

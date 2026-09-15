@@ -8,8 +8,12 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+
+import torch
 
 from gemq.allocation.ilp_solvers import GEMQSolver
+from gemq.quantizers.gptq import MCMoeGPTQWeightQuantizer
 from gemq.utils.model_registry import NAME_TO_MODEL, ModelType
 
 
@@ -133,6 +137,25 @@ class ProtocolModelNamesTest(unittest.TestCase):
             )
             allocation = solver.solve_all(total_bits=6)
         self.assertEqual(allocation[0][2], 3)
+
+    def test_mcmoe_mse_search_uses_fp32_for_bf16_weights(self):
+        for dtype in (torch.bfloat16, torch.float16):
+            quantizer = MCMoeGPTQWeightQuantizer(
+                torch.randn(4, 8, dtype=dtype), nbits=2, groupsize=4, mse=True
+            )
+            seen_scales = []
+            original = quantizer.quantize_vector
+
+            def traced(values, scales, zeros, max_int):
+                seen_scales.append(scales.detach().clone())
+                return original(values, scales, zeros, max_int)
+
+            with patch.object(quantizer, "quantize_vector", side_effect=traced):
+                scales, zeros, _max_int = quantizer.find_params(quantizer.W)
+            self.assertEqual(scales.dtype, torch.float32)
+            self.assertEqual(zeros.dtype, torch.float32)
+            self.assertEqual(len(seen_scales), 101)
+            self.assertEqual(torch.unique(torch.stack(seen_scales), dim=0).shape[0], 101)
 
 
 if __name__ == "__main__":
