@@ -164,9 +164,11 @@ class ProtocolModelNamesTest(unittest.TestCase):
                 torch.randn(4, 8, dtype=dtype), nbits=2, groupsize=4, mse=True
             )
             seen_scales = []
+            seen_values = []
             original = quantizer.quantize_vector
 
             def traced(values, scales, zeros, max_int):
+                seen_values.append(values.detach().clone())
                 seen_scales.append(scales.detach().clone())
                 return original(values, scales, zeros, max_int)
 
@@ -174,6 +176,7 @@ class ProtocolModelNamesTest(unittest.TestCase):
                 scales, zeros, _max_int = quantizer.find_params(quantizer.W)
             self.assertEqual(scales.dtype, torch.float32)
             self.assertEqual(zeros.dtype, torch.float32)
+            self.assertTrue(all(values.dtype == torch.float32 for values in seen_values))
             self.assertEqual(len(seen_scales), 101)
             self.assertEqual(torch.unique(torch.stack(seen_scales), dim=0).shape[0], 101)
 
