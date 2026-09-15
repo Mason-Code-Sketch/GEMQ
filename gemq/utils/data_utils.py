@@ -1,5 +1,6 @@
 import itertools
 import json
+import random
 from pathlib import Path
 
 import numpy as np
@@ -67,7 +68,6 @@ def get_wikitext2(
         trainenc = tokenizer(" ".join(traindata["text"]), return_tensors="pt")
     testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
 
-    import random
     trainloader = []
     if experiment_protocol == "vivit_ggn":
         available_starts = trainenc.input_ids.shape[1] - seqlen + 1
@@ -101,7 +101,6 @@ def get_c4_new(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None)
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=use_fast)
 
-    import random
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
@@ -126,6 +125,43 @@ def get_c4_new(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None)
     valenc = TokenizerWrapper(valenc)
 
     return trainloader, valenc
+
+
+def build_vivit_c4_calib_loader(
+    tokenizer,
+    nsamples,
+    seqlen,
+    batch_size,
+    seed,
+    dataset_root=None,
+):
+    """Match ViViT-GGN C4 random-document, random-window calibration sampling."""
+    traindata = _load_split(dataset_root, "c4", "train")
+    if traindata is None:
+        traindata = load_dataset(
+            "allenai/c4",
+            data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
+            split="train",
+        )
+
+    rng = random.Random(seed)
+    spans = []
+    while len(spans) < nsamples:
+        document_index = rng.randint(0, len(traindata) - 1)
+        token_ids = tokenizer(
+            traindata[document_index]["text"],
+            return_tensors="pt",
+            add_special_tokens=True,
+        ).input_ids[0]
+        if token_ids.numel() < seqlen:
+            continue
+        start = rng.randint(0, token_ids.numel() - seqlen)
+        spans.append(token_ids[start:start + seqlen])
+
+    return [
+        (torch.stack(spans[start:start + batch_size]), None)
+        for start in range(0, len(spans), batch_size)
+    ]
 
 
 def get_loaders(
@@ -161,7 +197,18 @@ def build_calib_loader(
     num_workers: int,
     seed: int = 41,
     dataset_root=None,
+    experiment_protocol="gemq",
 ):
+    if dataset == "c4" and experiment_protocol == "vivit_ggn":
+        return build_vivit_c4_calib_loader(
+            tokenizer,
+            n_blocks_for_stat,
+            max_block_size,
+            batch_size,
+            seed,
+            dataset_root,
+        )
+
     DATASETS = {
         "c4": lambda: load_dataset("json", data_files={"train": "data/c4-train.00000-of-01024.json"}),
         "math": lambda: load_dataset("json", data_files={"train": "data/math_pretrain_style.json"}),
@@ -273,7 +320,13 @@ def get_calib_loader(tokenizer, args):
             num_workers=4,
             seed=args.seed,
             dataset_root=getattr(args, "dataset_root", None),
+            experiment_protocol=getattr(args, "experiment_protocol", "gemq"),
         )
+        if (
+            args.calib_dataset == "c4"
+            and getattr(args, "experiment_protocol", "gemq") == "vivit_ggn"
+        ):
+            return loader
         # unify the dataloader format
         calib_loader = []
         for i, batch in enumerate(loader):
@@ -293,6 +346,7 @@ def get_calib_loader(tokenizer, args):
                 num_workers=4,
                 seed=args.seed,
                 dataset_root=getattr(args, "dataset_root", None),
+                experiment_protocol=getattr(args, "experiment_protocol", "gemq"),
             )
             # unify the dataloader format
             for i, batch in enumerate(loader):
