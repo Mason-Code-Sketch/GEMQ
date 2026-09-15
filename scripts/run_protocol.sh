@@ -17,10 +17,29 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 source "$config_file"
 
-if [[ -z "${MODEL_NAME:-}" || -z "${MODEL_PATH:-}" || -z "${DATASET_ROOT:-}" ]]; then
-    echo "Protocol config must define MODEL_NAME, MODEL_PATH, and DATASET_ROOT."
+if [[ -z "${MODEL_NAME:-}" || -z "${MODEL_ID:-}" ]]; then
+    echo "Protocol config must define MODEL_NAME and MODEL_ID."
     exit 2
 fi
+
+resolve_asset_root() {
+    local candidate
+    for candidate in \
+        "${PROTOCOL_ASSET_ROOT:-}" \
+        "${repo_root}/../.." \
+        "${repo_root}/../../../data"; do
+        if [[ -n "$candidate" && -d "${candidate}/models" && -d "${candidate}/datasets" ]]; then
+            cd "$candidate" && pwd
+            return 0
+        fi
+    done
+    echo "Could not find a parent containing models/ and datasets/." >&2
+    exit 2
+}
+
+asset_root="$(resolve_asset_root)"
+MODEL_PATH="${asset_root}/models/${MODEL_ID}"
+DATASET_ROOT="${asset_root}/datasets"
 
 model_key="$(basename "$config_file" .env)"
 artifact_root="results/protocol/${model_key}"

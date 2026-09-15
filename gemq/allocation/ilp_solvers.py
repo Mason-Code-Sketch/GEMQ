@@ -30,6 +30,7 @@ class GEMQSolver:
         extra_constr="",
         start_layer_idx=0,
         backend="highs",
+        fixed_expert_bits=None,
     ):
         if backend not in AVAILABLE_BACKENDS:
             raise ValueError(
@@ -48,6 +49,15 @@ class GEMQSolver:
         print(f"num_layers: {self.num_layers}, num_experts: {self.num_experts}, x_space: {self.x_space}")
 
         self.extra_constr = extra_constr
+        self.fixed_expert_bits = {
+            int(expert): int(bit)
+            for expert, bit in (fixed_expert_bits or {}).items()
+        }
+        for expert, bit in self.fixed_expert_bits.items():
+            if not 0 <= expert < self.num_experts:
+                raise ValueError(f"fixed expert index out of range: {expert}")
+            if bit not in self.x_space:
+                raise ValueError(f"fixed expert bit is not a candidate: {bit}")
 
         self.start_layer_idx = start_layer_idx
 
@@ -131,6 +141,19 @@ class GEMQSolver:
         else:
             A_lb = sp.csr_matrix((0, n))
             b_lb = np.zeros(0)
+
+        if self.fixed_expert_bits:
+            rows, cols = [], []
+            for li in range(L):
+                for expert, bit in self.fixed_expert_bits.items():
+                    rows.append(len(rows))
+                    cols.append((li * E + expert) * K + self.x_space.index(bit))
+            fixed = sp.csr_matrix(
+                (np.ones(len(rows)), (rows, cols)),
+                shape=(len(rows), n),
+            )
+            A_eq = sp.vstack((A_eq, fixed), format="csr")
+            b_eq = np.concatenate((b_eq, np.ones(len(rows))))
 
         return (A_ub, b_ub), (A_eq, b_eq), (A_lb, b_lb)
 

@@ -3,11 +3,13 @@
 import json
 import os
 from pathlib import Path
+import pickle
 import shutil
 import subprocess
 import tempfile
 import unittest
 
+from gemq.allocation.ilp_solvers import GEMQSolver
 from gemq.utils.model_registry import NAME_TO_MODEL, ModelType
 
 
@@ -18,7 +20,7 @@ class ProtocolModelNamesTest(unittest.TestCase):
         self.assertEqual(NAME_TO_MODEL["Qwen3-30B-A3B-Base"], ModelType.QWEN3MOE)
         self.assertEqual(NAME_TO_MODEL["Mixtral-8x7B-v0.1"], ModelType.MIXTRAL)
 
-    def test_protocol_configs_use_relative_model_and_dataset_paths(self):
+    def test_protocol_configs_identify_models_without_host_paths(self):
         config_dir = Path(__file__).parents[1] / "configs" / "protocol"
         for config_path in config_dir.glob("*.env"):
             values = dict(
@@ -26,22 +28,17 @@ class ProtocolModelNamesTest(unittest.TestCase):
                 for line in config_path.read_text().splitlines()
                 if line and not line.startswith("#")
             )
-            self.assertTrue(values["MODEL_PATH"].startswith("../../../data/models/"))
-            self.assertEqual(values["DATASET_ROOT"], "../../../data/datasets")
+            self.assertIn("MODEL_ID", values)
+            self.assertNotIn("MODEL_PATH", values)
+            self.assertNotIn("DATASET_ROOT", values)
             self.assertEqual(values["EXPERIMENT_PROTOCOL"], "vivit_ggn")
             self.assertEqual(values["GPTQ_IMPLEMENTATION"], "mcmoe")
 
-    def test_protocol_paths_exist_from_runner_root(self):
-        repo_root = Path(__file__).parents[1]
-        config_dir = repo_root / "configs" / "protocol"
-        for config_path in config_dir.glob("*.env"):
-            values = dict(
-                line.split("=", 1)
-                for line in config_path.read_text().splitlines()
-                if line and not line.startswith("#")
-            )
-            self.assertTrue((repo_root / values["MODEL_PATH"]).is_dir(), config_path)
-            self.assertTrue((repo_root / values["DATASET_ROOT"]).is_dir(), config_path)
+    def test_runner_resolves_asset_root_at_runtime(self):
+        runner = (Path(__file__).parents[1] / "scripts" / "run_protocol.sh").read_text()
+        self.assertIn("resolve_asset_root", runner)
+        self.assertIn("PROTOCOL_ASSET_ROOT", runner)
+        self.assertIn('MODEL_PATH="${asset_root}/models/${MODEL_ID}"', runner)
 
     def test_runner_preserves_progressive_model_roles(self):
         runner = (Path(__file__).parents[1] / "scripts" / "run_protocol.sh").read_text()
@@ -77,16 +74,18 @@ class ProtocolModelNamesTest(unittest.TestCase):
             env_file = temporary / f"{model_key}.env"
             env_file.write_text(
                 "MODEL_NAME=DeepSeek-V2-Lite\n"
-                "MODEL_PATH=base-model\n"
-                "DATASET_ROOT=datasets\n"
+                "MODEL_ID=base-model\n"
                 "PYTHON_BIN=" + str(fake_python) + "\n"
                 "GPTQ_IMPLEMENTATION=mcmoe\n"
             )
+            assets = temporary / "assets"
+            (assets / "models" / "base-model").mkdir(parents=True)
+            (assets / "datasets").mkdir()
             try:
                 bootstrap = subprocess.run(
                     [str(runner), str(env_file), "bootstrap", "3"],
                     cwd=repo_root,
-                    env={**os.environ},
+                    env={**os.environ, "PROTOCOL_ASSET_ROOT": str(assets)},
                     capture_output=True,
                     text=True,
                 )
@@ -94,7 +93,7 @@ class ProtocolModelNamesTest(unittest.TestCase):
                 progressive = subprocess.run(
                     [str(runner), str(env_file), "progressive", "3", "2.5"],
                     cwd=repo_root,
-                    env={**os.environ},
+                    env={**os.environ, "PROTOCOL_ASSET_ROOT": str(assets)},
                     capture_output=True,
                     text=True,
                 )
@@ -106,10 +105,34 @@ class ProtocolModelNamesTest(unittest.TestCase):
                     manifest["importance_model"],
                     f"results/protocol/{model_key}/checkpoints/avg3",
                 )
-                self.assertEqual(manifest["quantization_source_model"], "base-model")
+                self.assertEqual(
+                    manifest["quantization_source_model"],
+                    str(assets / "models" / "base-model"),
+                )
                 self.assertEqual(manifest["gptq_implementation"], "mcmoe")
             finally:
                 shutil.rmtree(artifact_root, ignore_errors=True)
+
+    def test_shared_expert_is_fixed_to_highest_candidate_bit(self):
+        coefficients = {
+            0: {
+                0: {1: 3.0, 2: 2.0, 3: 1.0},
+                1: {1: 3.0, 2: 2.0, 3: 1.0},
+                2: {1: 0.0, 2: 0.0, 3: 100.0},
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layer_re.pkl"
+            with path.open("wb") as handle:
+                pickle.dump(coefficients, handle)
+            solver = GEMQSolver(
+                layer_re_path=path,
+                x_space=(1, 2, 3),
+                backend="highs",
+                fixed_expert_bits={2: 3},
+            )
+            allocation = solver.solve_all(total_bits=6)
+        self.assertEqual(allocation[0][2], 3)
 
 
 if __name__ == "__main__":
