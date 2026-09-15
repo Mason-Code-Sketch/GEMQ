@@ -34,6 +34,12 @@ def _make_gptq_quantizer(weight, name, wbits, args):
             print(f"Forcing groupsize from {args.groupsize} to 64 for module: {name}")
 
     quantizer_cls = MCMoeGPTQWeightQuantizer if args.reproduce_mcmoe else GPTQWeightQuantizer
+    protocol_kwargs = {}
+    if quantizer_cls is MCMoeGPTQWeightQuantizer and args.experiment_protocol == "vivit_ggn":
+        protocol_kwargs = {
+            "mse_factors_on_device": True,
+            "dequantize_fp32": True,
+        }
     return quantizer_cls(
         weight,
         name,
@@ -44,6 +50,7 @@ def _make_gptq_quantizer(weight, name, wbits, args):
         args.actorder,
         args.static_groups,
         args.mse,
+        **protocol_kwargs,
     )
 
 

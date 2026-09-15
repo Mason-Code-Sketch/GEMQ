@@ -8,6 +8,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
         groupsize=-1, actorder=False, static_groups=False, mse=False,
+        mse_factors_on_device=False, dequantize_fp32=False,
     ):
         super().__init__()
 
@@ -21,6 +22,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         self.actorder = actorder
         self.static_groups = static_groups
         self.mse = mse
+        self.mse_factors_on_device = mse_factors_on_device
+        self.dequantize_fp32 = dequantize_fp32
 
         # init
         self.rows = x.shape[0]     # N_filters
@@ -82,7 +85,14 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             p_right = 1 + tau_range
 
             best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=self.W.dtype)  # (N_filters,)
-            for _, p in enumerate(torch.cat([torch.ones(1), torch.linspace(1.0, p_right, tau_n+1)[1:], torch.linspace(1.0, p_left, tau_n+1)[1:]])):
+            factor_kwargs = {}
+            if self.mse_factors_on_device:
+                factor_kwargs = {"device": x.device, "dtype": torch.float32}
+            for _, p in enumerate(torch.cat([
+                torch.ones(1, **factor_kwargs),
+                torch.linspace(1.0, p_right, tau_n + 1, **factor_kwargs)[1:],
+                torch.linspace(1.0, p_left, tau_n + 1, **factor_kwargs)[1:],
+            ])):
                 minv = p * min_val
                 maxv = p * max_val
 
@@ -226,6 +236,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         """
         Dequantize a quantized tensor using the given quantization parameters.
         """
+        if self.dequantize_fp32:
+            return ((Q.float() - zeros.float()) * scales.float()).to(self.W.dtype)
         return (Q - zeros) * scales
 
 
