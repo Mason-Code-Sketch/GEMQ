@@ -19,6 +19,7 @@ from gemq.utils.model_utils import *
 from gemq.utils.quant_utils import *
 from gemq.utils.eval_utils import evaluate_perplexity, run_lm_eval
 from gemq.utils.hf_loading import align_deepseek_softmax_scale
+from gemq.resource_ledger import ResourceLedger
 
 logging.set_verbosity_error()
 
@@ -647,6 +648,10 @@ def parse_args():
         "--final_eval_path", type=str, default="",
         help="Write final perplexities as JSON"
     )
+    parser.add_argument(
+        "--resource_output", type=str, default="",
+        help="Optional JSON path for wall-time and GPU-memory accounting",
+    )
     
     return parser.parse_args()
 
@@ -655,110 +660,112 @@ if __name__ == "__main__":
     # parse args
     args = parse_args()
     print(json.dumps(vars(args), indent=4))
+    resource_ledger = ResourceLedger(args.resource_output)
 
     if args.real_quant and NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE:
         raise ValueError("Qwen1.5-MoE-A2.7B currently supports fake quantization only.")
 
-    # load pre-trained model
-    print("Loading model ...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model, use_fast=args.use_fast, trust_remote_code=args.trust_remote_code
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, device_map="cpu", torch_dtype=args.model_dtype,
-        attn_implementation=args.attn_impl, trust_remote_code=args.trust_remote_code,
-    )
-    # HF's built-in DeepSeek-V2 omits the YaRN mscale on the attention scale; no-op on
-    # the official implementation, which already applies it.
-    align_deepseek_softmax_scale(model)
-
-    model.seqlen = 2048
-    model.eval()
-
-    # load calibration dataset
-    print("Loading calibration data ...")
-    dataloader = get_calib_loader(tokenizer, args)
-
-    # quantize model weights
-    if not args.eval_fp:
-        # quantize and get a name-module mapping of quantized modules
-        print(f"Start quantizing model weights ...")
-        quantizer = args.quantizer.lower().split("-")[0]
-        if quantizer == "gptq":
-            quant_modules = quantize_weights_gptq(model, dataloader, args)
-        else:
-            raise ValueError(f"Unsupported weight quantizer: {args.quantizer}")
-
-    if args.save_pre_finetune_path:
-        if args.real_quant:
-            raise ValueError("Pre-finetuning checkpoints require fake quantization.")
-        _clear_fake_quantization_metadata(quant_modules)
-        print("Saving pre-finetuning quantized model ...")
-        os.makedirs(args.save_pre_finetune_path, exist_ok=True)
-        save_quantized_model(
-            model, tokenizer, args.save_pre_finetune_path, args.save_dtype, args.real_quant
-        )
-    
-    # finetune routers
-    if args.finetune_routers:
-        model = dispatch_model_to_all_devices(model)
-
-        if not args.skip_pre_finetune_eval:
-            print("Evaluating quantized model before fine-tuning ...")
-            pre_finetune_ppl = evaluate_perplexity(
-                model, tokenizer, ["wikitext2", "c4"], args.model_name,
-                offload=False, dataset_root=args.dataset_root,
-                count_predictions=args.experiment_protocol == "vivit_ggn",
+    with resource_ledger.command():
+        with resource_ledger.component("load_model_and_tokenizer"):
+            print("Loading model ...")
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.model, use_fast=args.use_fast, trust_remote_code=args.trust_remote_code
             )
-            _write_perplexity(args.pre_finetune_eval_path, "gptq", pre_finetune_ppl)
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model, device_map="cpu", torch_dtype=args.model_dtype,
+                attn_implementation=args.attn_impl, trust_remote_code=args.trust_remote_code,
+            )
+            # HF's built-in DeepSeek-V2 omits the YaRN mscale on the attention scale; no-op on
+            # the official implementation, which already applies it.
+            align_deepseek_softmax_scale(model)
+            model.seqlen = 2048
+            model.eval()
 
-        print("Fine-tuning routers ...")
-        finetune_routers(model, dataloader, args)
+        with resource_ledger.component("load_calibration"):
+            print("Loading calibration data ...")
+            dataloader = get_calib_loader(tokenizer, args)
 
-    # evaluate model
-    model.eval()
-    if args.skip_eval:
-        pass
-    elif args.eval_downstream or args.finetune_routers:
-        print("Evaluating model ...")
-        # move all model weights onto gpus and use model() for forwarding
-        if not args.finetune_routers:
-            model = dispatch_model_to_all_devices(model)
+        if not args.eval_fp:
+            print("Start quantizing model weights ...")
+            quantizer = args.quantizer.lower().split("-")[0]
+            if quantizer != "gptq":
+                raise ValueError(f"Unsupported weight quantizer: {args.quantizer}")
+            with resource_ledger.component("quant_gptq"):
+                quant_modules = quantize_weights_gptq(model, dataloader, args)
 
-        final_ppl = evaluate_perplexity(
-            model, tokenizer, ["wikitext2", "c4"], args.model_name,
-            offload=False, dataset_root=args.dataset_root,
-            count_predictions=args.experiment_protocol == "vivit_ggn",
-        )
-        _write_perplexity(args.final_eval_path, "router_ft", final_ppl)
-        if args.eval_downstream:
-            if args.disable_cache:
-                model.config.use_cache = False
-            try:
-                run_lm_eval(
-                    model, tokenizer, tasks=args.downstream_tasks.split(","),
-                    batch_size=args.lm_eval_batchsize, num_fewshot=args.num_fewshot
+        if args.save_pre_finetune_path:
+            if args.real_quant:
+                raise ValueError("Pre-finetuning checkpoints require fake quantization.")
+            with resource_ledger.component("checkpoint_gptq"):
+                _clear_fake_quantization_metadata(quant_modules)
+                print("Saving pre-finetuning quantized model ...")
+                os.makedirs(args.save_pre_finetune_path, exist_ok=True)
+                save_quantized_model(
+                    model, tokenizer, args.save_pre_finetune_path, args.save_dtype, args.real_quant
                 )
-            except:
-                print("Downstream evaluation failed. Skipping ...")
-    else:
-        print("Evaluating model ...")
-        # memory-efficient evaluation with layer offloading
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=True, dataset_root=args.dataset_root, count_predictions=args.experiment_protocol == "vivit_ggn")
 
-    # save model
-    if args.save_path:
-        print("Saving model ...")
-        os.makedirs(args.save_path, exist_ok=True)
+        if args.finetune_routers:
+            with resource_ledger.component("prepare_router_ft"):
+                model = dispatch_model_to_all_devices(model)
 
-        if args.real_quant:
-            # for real quant, replace nn.Linear to HQQLinear for weight packing and saving
-            replace_linears(model, args.model_name, quant_modules, quant_weight=True)
-            check_packing(model, quant_modules, args)
+            if not args.skip_pre_finetune_eval:
+                with resource_ledger.component("evaluation_gptq"):
+                    print("Evaluating quantized model before fine-tuning ...")
+                    pre_finetune_ppl = evaluate_perplexity(
+                        model, tokenizer, ["wikitext2", "c4"], args.model_name,
+                        offload=False, dataset_root=args.dataset_root,
+                        count_predictions=args.experiment_protocol == "vivit_ggn",
+                    )
+                    _write_perplexity(args.pre_finetune_eval_path, "gptq", pre_finetune_ppl)
+
+            with resource_ledger.component("ft_routers"):
+                print("Fine-tuning routers ...")
+                finetune_routers(model, dataloader, args)
+
+        model.eval()
+        if args.skip_eval:
+            pass
+        elif args.eval_downstream or args.finetune_routers:
+            if not args.finetune_routers:
+                with resource_ledger.component("prepare_evaluation"):
+                    model = dispatch_model_to_all_devices(model)
+            with resource_ledger.component("evaluation_router_ft"):
+                print("Evaluating model ...")
+                final_ppl = evaluate_perplexity(
+                    model, tokenizer, ["wikitext2", "c4"], args.model_name,
+                    offload=False, dataset_root=args.dataset_root,
+                    count_predictions=args.experiment_protocol == "vivit_ggn",
+                )
+                _write_perplexity(args.final_eval_path, "router_ft", final_ppl)
+                if args.eval_downstream:
+                    if args.disable_cache:
+                        model.config.use_cache = False
+                    try:
+                        run_lm_eval(
+                            model, tokenizer, tasks=args.downstream_tasks.split(","),
+                            batch_size=args.lm_eval_batchsize, num_fewshot=args.num_fewshot
+                        )
+                    except:
+                        print("Downstream evaluation failed. Skipping ...")
         else:
-            # Remove transient GPTQ tensors before saving fake quantized weights.
-            _clear_fake_quantization_metadata(quant_modules)
+            with resource_ledger.component("evaluation"):
+                print("Evaluating model ...")
+                evaluate_perplexity(
+                    model, tokenizer, ["wikitext2", "c4"], args.model_name,
+                    offload=True, dataset_root=args.dataset_root,
+                    count_predictions=args.experiment_protocol == "vivit_ggn",
+                )
 
-        # save the quantized model
-        save_quantized_model(model, tokenizer, args.save_path, args.save_dtype, args.real_quant)
-        print(f"Quantized model saved to:", args.save_path)
+        if args.save_path:
+            with resource_ledger.component("checkpoint_router_ft"):
+                print("Saving model ...")
+                os.makedirs(args.save_path, exist_ok=True)
+                if args.real_quant:
+                    replace_linears(model, args.model_name, quant_modules, quant_weight=True)
+                    check_packing(model, quant_modules, args)
+                else:
+                    _clear_fake_quantization_metadata(quant_modules)
+                save_quantized_model(
+                    model, tokenizer, args.save_path, args.save_dtype, args.real_quant
+                )
+                print("Quantized model saved to:", args.save_path)

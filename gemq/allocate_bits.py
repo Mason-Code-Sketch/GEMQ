@@ -7,6 +7,7 @@ import re
 
 from gemq.utils.model_utils import get_model_info
 from gemq.allocation.ilp_solvers import AVAILABLE_BACKENDS, GEMQSolver
+from gemq.resource_ledger import ResourceLedger
 
 
 def auto_parse_filename(layer_re_path):
@@ -123,6 +124,10 @@ def parse_args():
         "--save_path", type=str, default="",
         help="Path to save the bit allocation results (leave empty to auto-generate)",
     )
+    parser.add_argument(
+        "--resource_output", type=str, default="",
+        help="Optional JSON path for wall-time and GPU-memory accounting",
+    )
     return parser.parse_args()
 
 
@@ -130,8 +135,11 @@ if __name__ == "__main__":
     # parse args
     args = parse_args()
     print(json.dumps(vars(args), indent=4))
+    resource_ledger = ResourceLedger(args.resource_output)
 
-    if args.ilp_solver == "gemq":
-        run_gemq_solver(args)
-    else:
-        raise ValueError(f"Unknown solver: {args.ilp_solver}")
+    with resource_ledger.command():
+        if args.ilp_solver == "gemq":
+            with resource_ledger.component("solve_lp"):
+                run_gemq_solver(args)
+        else:
+            raise ValueError(f"Unknown solver: {args.ilp_solver}")

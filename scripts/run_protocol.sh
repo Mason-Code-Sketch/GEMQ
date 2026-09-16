@@ -179,7 +179,8 @@ run_stats() {
         "${common_model_args[@]:2}" \
         "${common_data_args[@]}" \
         --calib_dataset c4 \
-        --layer_grads_path "$layer_grads_path"
+        --layer_grads_path "$layer_grads_path" \
+        --resource_output "${stats_root}/${stage_label}/resource.json"
     run_logged "${stage_label}_layer_re" "$python_bin" -m gemq.compute_model_stats \
         --mode layer_re \
         --model "$importance_model" \
@@ -189,7 +190,8 @@ run_stats() {
         --wbits 1,2,3 \
         --layer_grads_path "$layer_grads_path" \
         --layer_re_path "$layer_re_path" \
-        --forward_batch_size "${FORWARD_BATCH_SIZE:-1}"
+        --forward_batch_size "${FORWARD_BATCH_SIZE:-1}" \
+        --resource_output "${stats_root}/${stage_label}/resource.json"
 }
 
 run_allocate() {
@@ -205,7 +207,8 @@ run_allocate() {
         --bit_candidates 1,2,3 \
         --ilp_solver gemq \
         --ilp_backend "${ILP_BACKEND:-highs}" \
-        --save_path "$allocation_path"
+        --save_path "$allocation_path" \
+        --resource_output "${alloc_root}/${stage_label}/resource.json"
 }
 
 run_quantize() {
@@ -237,6 +240,7 @@ run_quantize() {
         --save_pre_finetune_path "$gptq_checkpoint"
         --pre_finetune_eval_path "${stage_evaluation_root}/gptq.json"
         --final_eval_path "${stage_evaluation_root}/router_ft.json"
+        --resource_output "${stage_evaluation_root}/resource_breakdown.json"
         --save_dtype "${SAVE_DTYPE:-float16}"
         --save_path "$router_ft_checkpoint"
     )
@@ -253,6 +257,15 @@ run_quantize() {
         "${common_model_args[@]}" \
         "${common_data_args[@]}" \
         "${quantize_args[@]}"
+    "$python_bin" - "${stage_evaluation_root}/resource_breakdown.json" \
+        "${stats_root}/${stage_label}/resource.json" \
+        "${alloc_root}/${stage_label}/resource.json" \
+        "${stage_evaluation_root}/resource_breakdown.json" <<'PY'
+import sys
+from gemq.resource_ledger import merge_ledgers
+
+merge_ledgers(sys.argv[1], sys.argv[2:])
+PY
     "$python_bin" - "$artifact_root" "$stage_label" "$target_bit" "$allocation_path" "$importance_model" "$MODEL_PATH" "${GPTQ_IMPLEMENTATION:-mcmoe}" "$gptq_checkpoint" "$router_ft_checkpoint" "$stage_evaluation_root" "$MODEL_NAME" "${ILP_BACKEND:-highs}" "${RFT_EPOCHS:-1}" "${RFT_BATCH_SIZE:-1}" "${RFT_LR:-0.0001}" "${RFT_WEIGHT_DECAY:-0.0001}" "${NSAMPLES:-128}" "${SEQLEN:-2048}" <<'PY'
 import json
 import hashlib
@@ -305,6 +318,7 @@ manifest = {
         "gptq": str(Path(evaluation_root) / "gptq.json"),
         "router_ft": str(Path(evaluation_root) / "router_ft.json"),
     },
+    "resource_breakdown": str(Path(evaluation_root) / "resource_breakdown.json"),
     "gptq_implementation": gptq_implementation,
     "allocation_solver": {"formulation": "gemq", "backend": ilp_backend},
     "data_protocol": {
