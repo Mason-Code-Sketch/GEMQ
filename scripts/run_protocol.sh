@@ -253,8 +253,10 @@ run_quantize() {
         "${common_model_args[@]}" \
         "${common_data_args[@]}" \
         "${quantize_args[@]}"
-    "$python_bin" - "$artifact_root" "$stage_label" "$target_bit" "$allocation_path" "$importance_model" "$MODEL_PATH" "${GPTQ_IMPLEMENTATION:-mcmoe}" "$gptq_checkpoint" "$router_ft_checkpoint" "$stage_evaluation_root" <<'PY'
+    "$python_bin" - "$artifact_root" "$stage_label" "$target_bit" "$allocation_path" "$importance_model" "$MODEL_PATH" "${GPTQ_IMPLEMENTATION:-mcmoe}" "$gptq_checkpoint" "$router_ft_checkpoint" "$stage_evaluation_root" "$MODEL_NAME" "${ILP_BACKEND:-highs}" "${RFT_EPOCHS:-1}" "${RFT_BATCH_SIZE:-1}" "${RFT_LR:-0.0001}" "${RFT_WEIGHT_DECAY:-0.0001}" "${NSAMPLES:-128}" "${SEQLEN:-2048}" <<'PY'
 import json
+import hashlib
+import pickle
 import sys
 from pathlib import Path
 
@@ -268,12 +270,35 @@ gptq_implementation = sys.argv[7]
 gptq_checkpoint = sys.argv[8]
 router_ft_checkpoint = sys.argv[9]
 evaluation_root = sys.argv[10]
+model_name = sys.argv[11]
+ilp_backend = sys.argv[12]
+rft_epochs, rft_batch_size, rft_lr, rft_weight_decay = sys.argv[13:17]
+nsamples, seqlen = sys.argv[17:19]
+
+with allocation.open("rb") as handle:
+    allocation_values = pickle.load(handle)
+
+shared_expert = {"DeepSeek-V2-Lite": (64, 2), "Qwen1.5-MoE-A2.7B": (60, 4)}.get(model_name)
+histogram = {}
+weighted_bits = 0
+weighted_experts = 0
+for experts in allocation_values.values():
+    for expert_id, bit in experts.items():
+        multiplier = shared_expert[1] if shared_expert and expert_id == shared_expert[0] else 1
+        histogram[str(bit)] = histogram.get(str(bit), 0) + multiplier
+        weighted_bits += bit * multiplier
+        weighted_experts += multiplier
+
+allocation_sha256 = hashlib.sha256(allocation.read_bytes()).hexdigest()
 manifest = {
     "stage": stage,
     "target_average_bit": bit,
     "importance_model": importance_model,
     "quantization_source_model": quantization_source_model,
     "allocation": str(allocation),
+    "allocation_sha256": allocation_sha256,
+    "allocation_expert_histogram": histogram,
+    "allocation_expert_bpw": weighted_bits / weighted_experts,
     "gptq_checkpoint": gptq_checkpoint,
     "router_ft_checkpoint": router_ft_checkpoint,
     "evaluations": {
@@ -281,6 +306,21 @@ manifest = {
         "router_ft": str(Path(evaluation_root) / "router_ft.json"),
     },
     "gptq_implementation": gptq_implementation,
+    "allocation_solver": {"formulation": "gemq", "backend": ilp_backend},
+    "data_protocol": {
+        "statistics": {"dataset": "c4", "samples": int(nsamples), "sequence_length": int(seqlen)},
+        "gptq_and_router_ft": {"dataset": "wikitext2", "samples": int(nsamples), "sequence_length": int(seqlen)},
+    },
+    "gptq": {
+        "candidate_bits": [1, 2, 3], "group_size": 128, "asymmetric": True,
+        "mse": True, "reproduce_mcmoe": gptq_implementation == "mcmoe",
+        "attention_bits": 4, "dense_bits": 4, "router_bits": 16,
+    },
+    "router_ft": {
+        "enabled": True, "optimizer": "AdamW", "epochs": int(rft_epochs),
+        "batch_size": int(rft_batch_size), "learning_rate": float(rft_lr),
+        "weight_decay": float(rft_weight_decay),
+    },
 }
 path = root / "manifests" / f"{stage}_avg{bit}.json"
 path.parent.mkdir(parents=True, exist_ok=True)
