@@ -5,7 +5,7 @@ set -euo pipefail
 # artifacts are rooted under results/protocol so source and external data paths
 # remain untouched.
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <protocol-env> <stats|allocate|quantize|bootstrap|progressive|progressive-stats|progressive-allocate|progressive-quantize> ..."
+    echo "Usage: $0 <protocol-env> <stats|allocate|quantize|bootstrap|progressive> ..."
     exit 2
 fi
 
@@ -377,55 +377,6 @@ case "$stage" in
         write_invocation_metadata "progressive_${stage_label}" "$previous_bit" "$target_bit" "$importance_model"
         IMPORTANCE_MODEL="$importance_model" run_stats "$stage_label" "$importance_model"
         run_allocate "$stage_label" "$target_bit"
-        run_quantize "$stage_label" "$target_bit" "$importance_model"
-        ;;
-    progressive-stats)
-        previous_bit="${3:-}"
-        target_bit="${4:-}"
-        if [[ -z "$previous_bit" || -z "$target_bit" ]]; then
-            echo "progressive-stats requires <previous-bit> <target-bit>."
-            exit 2
-        fi
-        importance_model="${checkpoint_root}/avg${previous_bit}/router_ft"
-        if [[ ! -d "$importance_model" ]]; then
-            echo "Missing previous fake-quantized checkpoint: $importance_model"
-            exit 2
-        fi
-        stage_label="from-${previous_bit}-to-${target_bit}"
-        write_invocation_metadata "progressive_stats_${stage_label}" "$previous_bit" "$target_bit" "$importance_model"
-        IMPORTANCE_MODEL="$importance_model" run_stats "$stage_label" "$importance_model"
-        ;;
-    progressive-allocate)
-        previous_bit="${3:-}"
-        target_bit="${4:-}"
-        if [[ -z "$previous_bit" || -z "$target_bit" ]]; then
-            echo "progressive-allocate requires <previous-bit> <target-bit>."
-            exit 2
-        fi
-        stage_label="from-${previous_bit}-to-${target_bit}"
-        stage_paths "$stage_label"
-        if [[ ! -f "$layer_re_path" ]]; then
-            echo "Missing progressive reconstruction errors: $layer_re_path"
-            exit 2
-        fi
-        write_invocation_metadata "progressive_allocate_${stage_label}" "$previous_bit" "$target_bit"
-        run_allocate "$stage_label" "$target_bit"
-        ;;
-    progressive-quantize)
-        previous_bit="${3:-}"
-        target_bit="${4:-}"
-        if [[ -z "$previous_bit" || -z "$target_bit" ]]; then
-            echo "progressive-quantize requires <previous-bit> <target-bit>."
-            exit 2
-        fi
-        stage_label="from-${previous_bit}-to-${target_bit}"
-        allocation_path="${alloc_root}/${stage_label}/bits123_avg${target_bit}.pkl"
-        if [[ ! -f "$allocation_path" ]]; then
-            echo "Missing progressive allocation: $allocation_path"
-            exit 2
-        fi
-        importance_model="${checkpoint_root}/avg${previous_bit}/router_ft"
-        write_invocation_metadata "progressive_quantize_${stage_label}" "$previous_bit" "$target_bit" "$importance_model"
         run_quantize "$stage_label" "$target_bit" "$importance_model"
         ;;
     *)
