@@ -167,6 +167,7 @@ def evaluate_perplexity(
     use_cache = model.config.use_cache
     model.config.use_cache = False
 
+    results = {}
     # for each dataset
     for dataset in datasets:
         testenc = get_testenc(tokenizer, dataset, model.seqlen, dataset_root)
@@ -181,9 +182,11 @@ def evaluate_perplexity(
                 count_predictions=count_predictions,
             )
         print(f"[{dataset}] ppl: {ppl:.4f}")
+        results[dataset] = ppl
 
     # restore
     model.config.use_cache = use_cache
+    return results
 
 
 

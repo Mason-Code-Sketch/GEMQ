@@ -179,6 +179,24 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
         model.save_pretrained(save_path)
 
 
+def _clear_fake_quantization_metadata(quant_modules):
+    """Remove transient GPTQ tensors before saving a pseudo-quantized checkpoint."""
+    for module in quant_modules.values():
+        module.quant_scales = None
+        module.quant_zeros = None
+        module.quant_nbits = None
+        module.quant_groupsize = None
+
+
+def _write_perplexity(path, phase, values):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump({"phase": phase, "perplexity": values}, handle, indent=2)
+        handle.write("\n")
+
+
 def finetune_routers(model, dataloader, args):
     """
     Fine-tune all router modules in the MoE model.
@@ -614,8 +632,20 @@ def parse_args():
         help="Save quantized checkpoint under this path"
     )
     parser.add_argument(
+        "--save_pre_finetune_path", type=str, default="",
+        help="Save the pseudo-quantized checkpoint before router fine-tuning"
+    )
+    parser.add_argument(
         "--save_dtype", type=str, default="float16", choices=["float16", "bfloat16"],
         help="Data type to save the quantized model"
+    )
+    parser.add_argument(
+        "--pre_finetune_eval_path", type=str, default="",
+        help="Write pre-router-finetuning perplexities as JSON"
+    )
+    parser.add_argument(
+        "--final_eval_path", type=str, default="",
+        help="Write final perplexities as JSON"
     )
     
     return parser.parse_args()
@@ -658,6 +688,16 @@ if __name__ == "__main__":
             quant_modules = quantize_weights_gptq(model, dataloader, args)
         else:
             raise ValueError(f"Unsupported weight quantizer: {args.quantizer}")
+
+    if args.save_pre_finetune_path:
+        if args.real_quant:
+            raise ValueError("Pre-finetuning checkpoints require fake quantization.")
+        _clear_fake_quantization_metadata(quant_modules)
+        print("Saving pre-finetuning quantized model ...")
+        os.makedirs(args.save_pre_finetune_path, exist_ok=True)
+        save_quantized_model(
+            model, tokenizer, args.save_pre_finetune_path, args.save_dtype, args.real_quant
+        )
     
     # finetune routers
     if args.finetune_routers:
@@ -665,7 +705,12 @@ if __name__ == "__main__":
 
         if not args.skip_pre_finetune_eval:
             print("Evaluating quantized model before fine-tuning ...")
-            evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root, count_predictions=args.experiment_protocol == "vivit_ggn")
+            pre_finetune_ppl = evaluate_perplexity(
+                model, tokenizer, ["wikitext2", "c4"], args.model_name,
+                offload=False, dataset_root=args.dataset_root,
+                count_predictions=args.experiment_protocol == "vivit_ggn",
+            )
+            _write_perplexity(args.pre_finetune_eval_path, "gptq", pre_finetune_ppl)
 
         print("Fine-tuning routers ...")
         finetune_routers(model, dataloader, args)
@@ -680,7 +725,12 @@ if __name__ == "__main__":
         if not args.finetune_routers:
             model = dispatch_model_to_all_devices(model)
 
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False, dataset_root=args.dataset_root, count_predictions=args.experiment_protocol == "vivit_ggn")
+        final_ppl = evaluate_perplexity(
+            model, tokenizer, ["wikitext2", "c4"], args.model_name,
+            offload=False, dataset_root=args.dataset_root,
+            count_predictions=args.experiment_protocol == "vivit_ggn",
+        )
+        _write_perplexity(args.final_eval_path, "router_ft", final_ppl)
         if args.eval_downstream:
             if args.disable_cache:
                 model.config.use_cache = False
@@ -706,12 +756,8 @@ if __name__ == "__main__":
             replace_linears(model, args.model_name, quant_modules, quant_weight=True)
             check_packing(model, quant_modules, args)
         else:
-            # for fake quant, remove the extra quantization parameters for saving
-            for name, m in quant_modules.items():
-                m.quant_scales = None
-                m.quant_zeros = None
-                m.quant_nbits = None
-                m.quant_groupsize = None
+            # Remove transient GPTQ tensors before saving fake quantized weights.
+            _clear_fake_quantization_metadata(quant_modules)
 
         # save the quantized model
         save_quantized_model(model, tokenizer, args.save_path, args.save_dtype, args.real_quant)

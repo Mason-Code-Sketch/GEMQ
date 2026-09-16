@@ -46,7 +46,82 @@ artifact_root="results/protocol/${model_key}"
 stats_root="${artifact_root}/statistics"
 alloc_root="${artifact_root}/allocations"
 checkpoint_root="${artifact_root}/checkpoints"
+evaluation_root="${artifact_root}/evaluations"
 python_bin="${PYTHON_BIN:-python}"
+
+# Keep every runtime byproduct of a protocol run under its artifact root.
+runtime_root="${artifact_root}/runtime"
+mkdir -p "$runtime_root"
+export PYTHONDONTWRITEBYTECODE=1
+export XDG_CACHE_HOME="${runtime_root}/xdg-cache"
+export HF_HOME="${runtime_root}/huggingface"
+export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets"
+export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
+export TMPDIR="${runtime_root}/tmp"
+mkdir -p "$XDG_CACHE_HOME" "$HF_HOME" "$TMPDIR"
+
+write_invocation_metadata() {
+    local metadata_stage="$1"
+    shift
+    local timestamp
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p "${artifact_root}/metadata" "${artifact_root}/resolved-configs"
+    cp "$config_file" "${artifact_root}/resolved-configs/${timestamp}_${metadata_stage}.env"
+    "$python_bin" - "${artifact_root}/metadata/${timestamp}_${metadata_stage}.json" \
+        "$metadata_stage" "$repo_root" "$config_file" "$@" <<'PY'
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+output = Path(sys.argv[1])
+stage = sys.argv[2]
+repo = Path(sys.argv[3])
+config = Path(sys.argv[4])
+arguments = sys.argv[5:]
+
+def command(*args):
+    return subprocess.run(args, cwd=repo, text=True, capture_output=True, check=False).stdout.strip()
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+packages = {}
+for package in ("torch", "transformers", "datasets", "scipy", "hqq", "gemlite"):
+    try:
+        packages[package] = importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        packages[package] = None
+
+tracked = ("gemq/quantize.py", "gemq/compute_model_stats.py", "gemq/allocate_bits.py", "scripts/run_protocol.sh")
+output.write_text(json.dumps({
+    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    "stage": stage,
+    "script_arguments": arguments,
+    "protocol_config": str(config),
+    "source_commit": command("git", "rev-parse", "HEAD"),
+    "source_status": command("git", "status", "--short"),
+    "source_sha256": {path: sha256(repo / path) for path in tracked},
+    "python": sys.version,
+    "platform": platform.platform(),
+    "dependencies": packages,
+    "runtime_paths": {
+        key: os.environ[key]
+        for key in ("PYTHONDONTWRITEBYTECODE", "XDG_CACHE_HOME", "HF_HOME", "HF_DATASETS_CACHE", "TMPDIR")
+    },
+}, indent=2) + "\n")
+PY
+}
 
 common_model_args=(
     --model "$MODEL_PATH"
@@ -85,6 +160,11 @@ run_logged() {
     shift
     local log_path="${artifact_root}/logs/${log_name}.log"
     mkdir -p "$(dirname "$log_path")"
+    {
+        printf '[command] '
+        printf '%q ' "$@"
+        printf '\n'
+    } >> "$log_path"
     "$@" 2>&1 | tee -a "$log_path"
 }
 
@@ -137,7 +217,11 @@ run_quantize() {
         echo "Missing allocation: $allocation_path"
         exit 2
     fi
-    mkdir -p "$checkpoint_root"
+    local stage_checkpoint_root="${checkpoint_root}/avg${target_bit}"
+    local gptq_checkpoint="${stage_checkpoint_root}/gptq"
+    local router_ft_checkpoint="${stage_checkpoint_root}/router_ft"
+    local stage_evaluation_root="${evaluation_root}/${stage_label}/avg${target_bit}"
+    mkdir -p "$stage_checkpoint_root" "$stage_evaluation_root"
     quantize_args=(
         --calib_dataset wikitext2
         --quantizer gptq
@@ -150,9 +234,11 @@ run_quantize() {
         --dense_wbits 4
         --gate_wbits 16
         --expert_wbits 3
-        --skip_pre_finetune_eval
+        --save_pre_finetune_path "$gptq_checkpoint"
+        --pre_finetune_eval_path "${stage_evaluation_root}/gptq.json"
+        --final_eval_path "${stage_evaluation_root}/router_ft.json"
         --save_dtype "${SAVE_DTYPE:-float16}"
-        --save_path "${checkpoint_root}/avg${target_bit}"
+        --save_path "$router_ft_checkpoint"
     )
     if [[ "${FINETUNE_ROUTERS:-false}" == "true" ]]; then
         quantize_args+=(
@@ -167,7 +253,7 @@ run_quantize() {
         "${common_model_args[@]}" \
         "${common_data_args[@]}" \
         "${quantize_args[@]}"
-    "$python_bin" - "$artifact_root" "$stage_label" "$target_bit" "$allocation_path" "$importance_model" "$MODEL_PATH" "${GPTQ_IMPLEMENTATION:-mcmoe}" <<'PY'
+    "$python_bin" - "$artifact_root" "$stage_label" "$target_bit" "$allocation_path" "$importance_model" "$MODEL_PATH" "${GPTQ_IMPLEMENTATION:-mcmoe}" "$gptq_checkpoint" "$router_ft_checkpoint" "$stage_evaluation_root" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -179,13 +265,21 @@ allocation = Path(sys.argv[4])
 importance_model = sys.argv[5]
 quantization_source_model = sys.argv[6]
 gptq_implementation = sys.argv[7]
+gptq_checkpoint = sys.argv[8]
+router_ft_checkpoint = sys.argv[9]
+evaluation_root = sys.argv[10]
 manifest = {
     "stage": stage,
     "target_average_bit": bit,
     "importance_model": importance_model,
     "quantization_source_model": quantization_source_model,
     "allocation": str(allocation),
-    "checkpoint": str(root / "checkpoints" / f"avg{bit}"),
+    "gptq_checkpoint": gptq_checkpoint,
+    "router_ft_checkpoint": router_ft_checkpoint,
+    "evaluations": {
+        "gptq": str(Path(evaluation_root) / "gptq.json"),
+        "router_ft": str(Path(evaluation_root) / "router_ft.json"),
+    },
     "gptq_implementation": gptq_implementation,
 }
 path = root / "manifests" / f"{stage}_avg{bit}.json"
@@ -198,6 +292,7 @@ case "$stage" in
     stats)
         stage_label="${3:-base}"
         importance_model="${4:-$MODEL_PATH}"
+        write_invocation_metadata "stats_${stage_label}" "$stage_label" "$importance_model"
         IMPORTANCE_MODEL="$importance_model" run_stats "$stage_label" "$importance_model"
         ;;
     allocate)
@@ -205,6 +300,7 @@ case "$stage" in
             echo "allocate requires a bit budget."
             exit 2
         fi
+        write_invocation_metadata "allocate_base_avg${bit_budget}" "$bit_budget"
         run_allocate base "$bit_budget"
         ;;
     quantize)
@@ -212,6 +308,7 @@ case "$stage" in
             echo "quantize requires a bit budget."
             exit 2
         fi
+        write_invocation_metadata "quantize_base_avg${bit_budget}" "$bit_budget" "$MODEL_PATH"
         run_quantize base "$bit_budget" "$MODEL_PATH"
         ;;
     bootstrap)
@@ -219,6 +316,7 @@ case "$stage" in
             echo "bootstrap requires a bit budget."
             exit 2
         fi
+        write_invocation_metadata "bootstrap_base_avg${bit_budget}" "$bit_budget" "$MODEL_PATH"
         IMPORTANCE_MODEL="$MODEL_PATH" run_stats base "$MODEL_PATH"
         run_allocate base "$bit_budget"
         run_quantize base "$bit_budget" "$MODEL_PATH"
@@ -230,12 +328,13 @@ case "$stage" in
             echo "progressive requires <previous-bit> <target-bit>."
             exit 2
         fi
-        importance_model="${checkpoint_root}/avg${previous_bit}"
+        importance_model="${checkpoint_root}/avg${previous_bit}/router_ft"
         if [[ ! -d "$importance_model" ]]; then
             echo "Missing previous fake-quantized checkpoint: $importance_model"
             exit 2
         fi
         stage_label="from-${previous_bit}-to-${target_bit}"
+        write_invocation_metadata "progressive_${stage_label}" "$previous_bit" "$target_bit" "$importance_model"
         IMPORTANCE_MODEL="$importance_model" run_stats "$stage_label" "$importance_model"
         run_allocate "$stage_label" "$target_bit"
         run_quantize "$stage_label" "$target_bit" "$importance_model"
