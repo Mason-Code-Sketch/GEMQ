@@ -258,6 +258,7 @@ run_quantize() {
         "${common_data_args[@]}" \
         "${quantize_args[@]}"
     "$python_bin" - "${stage_evaluation_root}/resource_breakdown.json" \
+        "${stage_evaluation_root}/resource_breakdown.json" \
         "${stats_root}/${stage_label}/resource.json" \
         "${alloc_root}/${stage_label}/resource.json" \
         "${stage_evaluation_root}/resource_breakdown.json" <<'PY'
