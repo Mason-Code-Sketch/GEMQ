@@ -267,7 +267,7 @@ def compute_qwen2_moe_layer_reconstruction_errors(
 ):
     """Evaluate RTN expert candidates on Qwen1.5's fused routed-expert tensors."""
     layer_quant_loss = defaultdict(dict)
-    num_routed_experts = moe_block.num_experts
+    num_routed_experts = moe_block.config.num_experts
 
     for expert_id in range(num_routed_experts + 1):
         if expert_id == num_routed_experts:
