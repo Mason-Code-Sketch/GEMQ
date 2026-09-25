@@ -304,6 +304,28 @@ def get_moe_block(layer, model_name):
     return moe_block
 
 
+def disable_deepseek_aux_loss(model, model_name):
+    """Disable auxiliary load-balancing gradients in official DeepSeek MoE gates."""
+    if NAME_TO_MODEL[model_name] != ModelType.DEEPSEEKV2:
+        return 0
+
+    disabled_gates = 0
+    for layer_idx, layer in enumerate(get_blocks(model, model_name)):
+        gate = getattr(get_moe_block(layer, model_name), "gate", None)
+        if gate is None:
+            continue
+        if not hasattr(gate, "alpha"):
+            raise RuntimeError(
+                f"DeepSeek MoE gate at layer {layer_idx} does not expose alpha."
+            )
+        gate.alpha = 0.0
+        disabled_gates += 1
+
+    if disabled_gates == 0:
+        raise RuntimeError("No DeepSeek MoE gates were found to disable auxiliary loss.")
+    return disabled_gates
+
+
 def get_shared_expert_block(moe_block, model_name):
     """
     Get the shared expert FFN from a moe block.

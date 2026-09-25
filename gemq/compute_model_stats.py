@@ -231,8 +231,9 @@ def compute_layer_grads(model, dataloader, args):
     """
     model.config.use_cache = False
 
-    # NOTE: disable aux loss
-    model.config.alpha = 0.0
+    disabled_gates = disable_deepseek_aux_loss(model, args.model_name)
+    if disabled_gates:
+        print(f"Disabled auxiliary loss in {disabled_gates} DeepSeek MoE gates.")
 
     # register hooks to get activation gradients
     layer_output_grads = defaultdict(list)
