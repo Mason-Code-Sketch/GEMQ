@@ -31,6 +31,7 @@ class GEMQSolver:
         start_layer_idx=0,
         backend="highs",
         fixed_expert_bits=None,
+        c2c3_excluded_experts=None,
     ):
         if backend not in AVAILABLE_BACKENDS:
             raise ValueError(
@@ -64,6 +65,15 @@ class GEMQSolver:
                 raise ValueError(
                     f"Fixed bitwidth {bitwidth} is not in x_space={self.x_space}"
                 )
+        self.c2c3_excluded_experts = set(c2c3_excluded_experts or ())
+        for expert_id in self.c2c3_excluded_experts:
+            if not 0 <= expert_id < self.num_experts:
+                raise ValueError(
+                    f"c2c3 excluded expert id {expert_id} is out of range for "
+                    f"{self.num_experts} experts"
+                )
+        if len(self.c2c3_excluded_experts) == self.num_experts:
+            raise ValueError("c2c3 cannot exclude every expert")
 
     @property
     def num_vars(self):
@@ -132,6 +142,8 @@ class GEMQSolver:
                 ki = self.x_space.index(k)
                 for li in range(L):
                     for j in range(E):
+                        if j in self.c2c3_excluded_experts:
+                            continue
                         rows.append(r)
                         cols.append((li * E + j) * K + ki)
                     r += 1

@@ -121,6 +121,17 @@ def get_stats(model, enc, args):
         # remove hook
         handle.remove()
 
+        if model_type == ModelType.QWEN2MOE:
+            bit_cfg = list(map(int, args.wbits.split(",")))
+            quant_loss[i] = compute_qwen2_moe_quantization_losses(
+                moe_block, block_inps, block_outs, bit_cfg
+            )
+            layers[i] = layer.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+            inps, outs = outs, inps
+            continue
+
         # compute expert quantization errors
         bit_cfg = list(map(int, args.wbits.split(",")))  # e.g., [1, 2, 3]
         expert_names = get_all_expert_names(model_name)  # NOTE: shared expert always at the end
@@ -308,6 +319,64 @@ def compute_qwen2_moe_layer_reconstruction_errors(
                     layer_sq_grads[start:end]
                     * (block_outs[start:end].double() - quant_block_outs.double()).pow(2)
                 ).sum().item()
+            layer_quant_loss[expert_id][bitwidth] = loss
+
+            if expert_id == num_routed_experts:
+                for module, original_weight in zip(modules, original_weights):
+                    module.weight.copy_(original_weight)
+            else:
+                moe_block.experts.gate_up_proj[expert_id].copy_(original_weights[0])
+                moe_block.experts.down_proj[expert_id].copy_(original_weights[1])
+
+    return layer_quant_loss
+
+
+@torch.inference_mode()
+def compute_qwen2_moe_quantization_losses(
+    moe_block, block_inps, block_outs, bit_cfg
+):
+    """Compute MC-MoE-style output losses for Qwen1.5 fused experts."""
+    layer_quant_loss = defaultdict(dict)
+    num_routed_experts = moe_block.num_experts
+
+    for expert_id in range(num_routed_experts + 1):
+        if expert_id == num_routed_experts:
+            modules = [
+                moe_block.shared_expert.gate_proj,
+                moe_block.shared_expert.up_proj,
+                moe_block.shared_expert.down_proj,
+            ]
+            original_weights = [module.weight.detach().clone() for module in modules]
+        else:
+            original_weights = [
+                moe_block.experts.gate_up_proj[expert_id].detach().clone(),
+                moe_block.experts.down_proj[expert_id].detach().clone(),
+            ]
+
+        for bitwidth in bit_cfg:
+            if expert_id == num_routed_experts:
+                quantized_weights = [
+                    MCMoeRTNWeightQuantizer(weight, nbits=bitwidth).quantize()
+                    for weight in original_weights
+                ]
+                for module, quantized_weight in zip(modules, quantized_weights):
+                    module.weight.copy_(quantized_weight)
+            else:
+                moe_block.experts.gate_up_proj[expert_id].copy_(
+                    MCMoeRTNWeightQuantizer(
+                        original_weights[0], nbits=bitwidth
+                    ).quantize()
+                )
+                moe_block.experts.down_proj[expert_id].copy_(
+                    MCMoeRTNWeightQuantizer(
+                        original_weights[1], nbits=bitwidth
+                    ).quantize()
+                )
+
+            loss = 0.0
+            for inputs, outputs in zip(block_inps, block_outs):
+                quant_outputs = moe_block(inputs)
+                loss += torch.norm(outputs.double() - quant_outputs.double()).item()
             layer_quant_loss[expert_id][bitwidth] = loss
 
             if expert_id == num_routed_experts:
