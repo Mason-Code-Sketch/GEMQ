@@ -18,6 +18,7 @@ from gemq.utils.data_utils import get_calib_loader
 from gemq.utils.model_utils import *
 from gemq.quantizers.rtn import MCMoeRTNWeightQuantizer
 from gemq.utils.hf_loading import align_deepseek_softmax_scale
+from gemq.resource_ledger import ResourceLedger
 
 logging.set_verbosity_error()
 
@@ -662,47 +663,49 @@ def parse_args():
         "--layer_re_path",  type=str, default="",
         help="Path to the weighted reconstruction errors"
     )
+    parser.add_argument(
+        "--resource_output", type=str, default="",
+        help="Optional JSON path for wall-time and GPU-memory accounting",
+    )
 
     return parser.parse_args()
 
 
+def main(args) -> None:
+    resource_ledger = ResourceLedger(args.resource_output)
+    with resource_ledger.command():
+        with resource_ledger.component("load_model_and_tokenizer"):
+            tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=args.use_fast)
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model,
+                device_map=("auto" if args.mode == "layer_grads" else "cpu"),
+                torch_dtype=args.model_dtype,
+                attn_implementation=args.attn_impl,
+                trust_remote_code=True,
+            )
+            align_deepseek_softmax_scale(model)
+            model.seqlen = args.seqlen
+            if args.mode == "layer_grads":
+                model.train()
+            else:
+                model.eval()
+
+        with resource_ledger.component("load_calibration"):
+            dataloader = get_calib_loader(tokenizer, args)
+
+        if args.mode == "layer_grads":
+            with resource_ledger.component("comp_grad"):
+                compute_layer_grads(model, dataloader, args)
+        elif args.mode == "layer_re":
+            print("Using faster implementation that batches expert forwards.")
+            with resource_ledger.component("comp_stats"):
+                compute_faster_layer_re(model, dataloader, args)
+        elif args.mode == "mcmoe_stats":
+            with resource_ledger.component("comp_stats"):
+                compute_mcmoe_stats(model, dataloader, args)
+
+
 if __name__ == "__main__":
-    # Parse args
     args = parse_args()
     print(json.dumps(vars(args), indent=4))
-
-    # load pre-trained model
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=args.use_fast)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, device_map=("auto" if args.mode == "layer_grads" else "cpu"),
-        # NOTE: hardcoded True, unlike quantize.py which exposes it as a flag. Either way
-        # align_deepseek_softmax_scale below keeps the two implementations equivalent.
-        torch_dtype=args.model_dtype, attn_implementation=args.attn_impl, trust_remote_code=True,
-    )
-    # HF's built-in DeepSeek-V2 omits the YaRN mscale on the attention scale; no-op on
-    # the official implementation, which already applies it.
-    align_deepseek_softmax_scale(model)
-
-    model.seqlen = args.seqlen
-    
-    if args.mode == "layer_grads":
-        model.train()
-    else:
-        model.eval()
-
-    # load calibration dataset
-    dataloader = get_calib_loader(tokenizer, args)
-
-    # get statistics
-    # compute layer output gradients wrt final CE loss
-    if args.mode == "layer_grads":
-        compute_layer_grads(model, dataloader, args)
-
-    # compute layer reconstruction errors weighted by layer output gradients
-    elif args.mode == "layer_re":
-        print("Using faster implementation that batches expert forwards.")
-        compute_faster_layer_re(model, dataloader, args)
-
-    # extract router statistics and reconstruction loss as done in MC-MoE 
-    elif args.mode == "mcmoe_stats":
-        compute_mcmoe_stats(model, dataloader, args)
+    main(args)

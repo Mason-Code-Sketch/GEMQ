@@ -62,10 +62,13 @@ prefix="${alloc_prefix}-WT2"
 if [[ "$save_model" == "true" ]]; then
     save_path="results/fake_quant_models/${model_name}/${qtype}/${prefix}_A4-G16-D4-E${bpe}${rft_tag}"
     io_args=(--save_path "$save_path")
+    resource_output="${save_path}/resource_breakdown.json"
 else
     save_path="None"
     io_args=()
+    resource_output="results/resource-records/${model_name}/${qtype}/${prefix}_A4-G16-D4-E${bpe}${rft_tag}.json"
 fi
+io_args+=(--resource_output "$resource_output")
 
 echo "=============================================="
 echo ">>> Quantization Job Summary"
@@ -78,6 +81,7 @@ echo " Expert bits:      ${bpe} (mixed: ${mixed_prec})"
 echo " Bit config:       ${bit_cfg}"
 echo " Finetune routers: ${finetune_routers} (epochs=${rft_epochs}, lr=${rft_lr})"
 echo " Save path:        ${save_path}"
+echo " Resource record:  ${resource_output}"
 echo "----------------------------------------------"
 echo ">>> Running quantization ..."
 echo "=============================================="
@@ -88,3 +92,14 @@ python -m gemq.quantize \
     "${quant_args[@]}" \
     "${eval_args[@]}" \
     "${io_args[@]}"
+
+stats_resource="cache/${model_name}/resources/c4-N128-L2048-Seed0.json"
+allocation_resource="${bit_cfg%.pkl}.resource.json"
+python - "${resource_output}" "${stats_resource}" "${allocation_resource}" <<'PY'
+import sys
+
+from gemq.resource_ledger import merge_ledgers
+
+output_path, *upstream_paths = sys.argv[1:]
+merge_ledgers(output_path, [output_path, *upstream_paths])
+PY
