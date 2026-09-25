@@ -248,6 +248,19 @@ def get_qwen2_num_routed_experts(moe_block):
             "Qwen1.5 experts.num_experts disagrees with fused weight tensors: "
             f"declared={declared_count}, tensors={num_routed_experts}."
         )
+
+    gate_count = getattr(moe_block.gate, "num_experts", None)
+    if gate_count is not None and gate_count != num_routed_experts:
+        raise ValueError(
+            "Qwen1.5 gate.num_experts disagrees with fused weight tensors: "
+            f"gate={gate_count}, tensors={num_routed_experts}."
+        )
+    gate_weight = getattr(moe_block.gate, "weight", None)
+    if gate_weight is not None and gate_weight.shape[0] != num_routed_experts:
+        raise ValueError(
+            "Qwen1.5 gate weight disagrees with fused weight tensors: "
+            f"gate={gate_weight.shape[0]}, tensors={num_routed_experts}."
+        )
     return int(num_routed_experts)
 
 

@@ -17,6 +17,7 @@ from gemq.utils.model_utils import (
     compute_gate_stats_hook_qwen2moe,
     get_decoder_hidden_states,
     get_qwen2_num_routed_experts,
+    validate_qwen2_moe_model,
 )
 
 
@@ -60,6 +61,19 @@ class _TinyRouterModel(torch.nn.Module):
         self.frozen = torch.nn.Parameter(torch.ones(2, 2))
 
 
+class _TinyQwenLayer(torch.nn.Module):
+    def __init__(self, moe_block):
+        super().__init__()
+        self.mlp = moe_block
+
+
+class _TinyQwenModel(torch.nn.Module):
+    def __init__(self, moe_block):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.layers = torch.nn.ModuleList([_TinyQwenLayer(moe_block)])
+
+
 class Qwen15AdaptationTest(unittest.TestCase):
     def test_fused_block_has_tensor_output_and_expert_count_on_experts(self):
         block = _make_qwen_moe_block()
@@ -82,6 +96,21 @@ class Qwen15AdaptationTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             get_decoder_hidden_states(hidden_states[0], hidden_states.shape)
+
+    def test_runtime_layout_validation_requires_the_configured_expert_count(self):
+        block = _make_qwen_moe_block()
+        model = _TinyQwenModel(block)
+        with self.assertRaisesRegex(ValueError, "requires 60"):
+            validate_qwen2_moe_model(model, "Qwen/Qwen1.5-MoE-A2.7B")
+
+        block.experts.num_experts = 60
+        block.experts.gate_up_proj = torch.nn.Parameter(
+            torch.empty(60, 16, 16)
+        )
+        block.experts.down_proj = torch.nn.Parameter(torch.empty(60, 16, 8))
+        block.gate.num_experts = 60
+        block.gate.weight = torch.nn.Parameter(torch.empty(60, 16))
+        validate_qwen2_moe_model(model, "Qwen/Qwen1.5-MoE-A2.7B")
 
     def test_gate_stats_uses_fused_weight_expert_count(self):
         block = _make_qwen_moe_block()
