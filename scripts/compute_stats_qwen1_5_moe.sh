@@ -15,10 +15,12 @@ dataset_root="../../datasets"
 nsamples=128
 seqlen=2048
 seed=0
-resource_output="cache/${model_name}/resources/${dataset}-N${nsamples}-L${seqlen}-Seed${seed}.json"
+wbits="1,2,3"
 
 # Step 1: layer-output gradients
 layer_grads_path="cache/${model_name}/LayerGrads_${dataset}-N${nsamples}-L${seqlen}-Seed${seed}${model_str}.pt"
+layer_re_path="cache/${model_name}/LayerRE_${dataset}-N${nsamples}-L${seqlen}-Seed${seed}_B${wbits}${model_str}_faster.pkl"
+resource_output="${layer_re_path%.pkl}.resource.json"
 python -m gemq.compute_model_stats \
     --mode "layer_grads" \
     --model "${model}" \
@@ -32,8 +34,6 @@ python -m gemq.compute_model_stats \
     --resource_output "${resource_output}"
 
 # Step 2: weighted layer reconstruction errors
-wbits="1,2,3"
-layer_re_path="cache/${model_name}/LayerRE_${dataset}-N${nsamples}-L${seqlen}-Seed${seed}_B${wbits}${model_str}_faster.pkl"
 python -m gemq.compute_model_stats \
     --mode "layer_re" \
     --model "${model}" \

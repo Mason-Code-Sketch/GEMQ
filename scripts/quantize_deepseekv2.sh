@@ -141,7 +141,7 @@ python -m gemq.quantize \
     "${eval_args[@]}" \
     "${io_args[@]}"
 
-stats_resource="cache/${model_name}/resources/c4-N128-L2048-Seed0.json"
+stats_resource="cache/${model_name}/LayerRE_c4-N128-L2048-Seed0_B1,2,3_faster.resource.json"
 allocation_resource="${bit_cfg%.pkl}.resource.json"
 python - "${resource_output}" "${stats_resource}" "${allocation_resource}" <<'PY'
 import sys
