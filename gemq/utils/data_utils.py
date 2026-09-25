@@ -1,5 +1,6 @@
 import itertools
 import json
+import random
 from pathlib import Path
 
 import numpy as np
@@ -50,7 +51,6 @@ def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False, dataset_root=No
     trainenc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt")
     testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
 
-    import random
     available_starts = trainenc.input_ids.shape[1] - seqlen + 1
     if nsamples > available_starts:
         raise ValueError(
@@ -68,6 +68,28 @@ def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False, dataset_root=No
     return trainloader, testenc
 
 
+def sample_gptq_c4_calibration(tokenizer, dataset, num_samples, seq_len, seed):
+    """Match moe-ptq's GPTQ C4 random-document, random-window sampling."""
+    if num_samples <= 0 or seq_len < 2:
+        raise ValueError("num_samples must be positive and seq_len >= 2")
+
+    rng = random.Random(seed)
+    spans, selections = [], []
+    while len(spans) < num_samples:
+        document_index = rng.randint(0, len(dataset) - 1)
+        token_ids = tokenizer(
+            dataset[document_index]["text"], return_tensors="pt"
+        ).input_ids[0]
+        if token_ids.numel() < seq_len:
+            continue
+
+        start = rng.randint(0, token_ids.numel() - seq_len)
+        spans.append(token_ids[start:start + seq_len])
+        selections.append({"document_index": document_index, "start": start})
+
+    return torch.stack(spans), selections
+
+
 def get_c4_new(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None):
     traindata = _load_split(dataset_root, "c4", "train")
     valdata = _load_split(dataset_root, "c4", "validation")
@@ -81,18 +103,16 @@ def get_c4_new(nsamples, seed, seqlen, model, use_fast=False, dataset_root=None)
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=use_fast)
 
-    import random
-    random.seed(seed)
+    input_ids, _ = sample_gptq_c4_calibration(
+        tokenizer,
+        traindata,
+        nsamples,
+        seqlen,
+        seed,
+    )
     trainloader = []
-    for _ in range(nsamples):
-        while True:
-            i = random.randint(0, len(traindata) - 1)
-            trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
-            if trainenc.input_ids.shape[1] >= seqlen:
-                break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
+    for span in input_ids:
+        inp = span.unsqueeze(0)
         tar = inp.clone()
         tar[:, :-1] = -100
         trainloader.append((inp, tar))
@@ -151,6 +171,32 @@ def build_calib_loader(
             " override this default with `--max_block_size xxx`."
         )
         block_size = max_block_size
+
+    if dataset == "c4":
+        if n_blocks_for_stat <= 0:
+            raise ValueError("C4 calibration requires a positive n_blocks_for_stat.")
+        input_ids, _ = sample_gptq_c4_calibration(
+            tokenizer,
+            all_set["train"],
+            n_blocks_for_stat,
+            block_size,
+            seed,
+        )
+        lm_calib_set = Dataset.from_dict(
+            {
+                "input_ids": input_ids.tolist(),
+                "labels": input_ids.tolist(),
+            }
+        )
+        return DataLoader(
+            lm_calib_set,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+            shuffle=False,
+            collate_fn=default_data_collator,
+        )
 
     if n_blocks_for_stat > 0:
         calib_set = all_set["train"].shuffle(seed=seed).select(
