@@ -69,10 +69,6 @@ def run_gemq_solver(args):
             {m.num_routed_experts_per_layer: max(bit_cands)}
             if args.model_name == "Qwen/Qwen1.5-MoE-A2.7B" else None
         ),
-        c2c3_excluded_experts=(
-            {m.num_routed_experts_per_layer}
-            if args.model_name == "Qwen/Qwen1.5-MoE-A2.7B" else None
-        ),
     )
     opt_set = global_solver.solve_all(total_bits=total_bits)
 
