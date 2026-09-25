@@ -17,6 +17,7 @@ from gemq.utils.model_utils import (
     compute_gate_stats_hook_qwen2moe,
     get_decoder_hidden_states,
     get_qwen2_num_routed_experts,
+    get_router_params,
     validate_qwen2_moe_model,
 )
 
@@ -52,13 +53,6 @@ class _FlatFakeQuantizer:
 
     def dequantize(self, quantized, scales, zeros):
         return self._dequantized
-
-
-class _TinyRouterModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.router = torch.nn.Parameter(torch.zeros(2, 2))
-        self.frozen = torch.nn.Parameter(torch.ones(2, 2))
 
 
 class _TinyQwenLayer(torch.nn.Module):
@@ -156,19 +150,25 @@ class Qwen15AdaptationTest(unittest.TestCase):
                 SimpleNamespace(mixed=True), {0: {0: 1, 1: 2, 2: 3}}, 0, 3
             )
 
-    def test_router_sanity_uses_parameter_identity(self):
-        model = _TinyRouterModel()
-        state = capture_router_finetune_state(model, [model.router])
-        with torch.no_grad():
-            model.router.add_(0.25)
+    def test_qwen_router_sanity_uses_parameter_identity(self):
+        block = _make_qwen_moe_block()
+        model = _TinyQwenModel(block)
+        router_params = get_router_params(model, "Qwen/Qwen1.5-MoE-A2.7B")
+        self.assertEqual([id(param) for param in router_params], [id(block.gate.weight)])
 
-        self.assertGreater(validate_router_finetune_state(model, [model.router], state), 0.0)
-
-        state = capture_router_finetune_state(model, [model.router])
+        state = capture_router_finetune_state(model, router_params)
         with torch.no_grad():
-            model.frozen.add_(0.25)
+            block.gate.weight.add_(0.25)
+
+        self.assertGreater(
+            validate_router_finetune_state(model, router_params, state), 0.0
+        )
+
+        state = capture_router_finetune_state(model, router_params)
+        with torch.no_grad():
+            block.experts.gate_up_proj.add_(0.25)
         with self.assertRaisesRegex(RuntimeError, "Frozen parameters changed"):
-            validate_router_finetune_state(model, [model.router], state)
+            validate_router_finetune_state(model, router_params, state)
 
 
 if __name__ == "__main__":
