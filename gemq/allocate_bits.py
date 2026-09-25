@@ -38,9 +38,9 @@ def compute_total_bits(model_name, bpe, bit_cands):
     """
     Auto compute the total bit budget for global ilp.
 
-    We assume the shared experts will get the highest bit;
-    all shared experts are merged to one single FFN, we need to consider this in bpl calculation;
-    NOTE: this is not the actual bpl because the shared experts are merged to one single expert
+    Shared experts are fixed at the highest candidate bit. Multiple logical shared
+    experts are merged into one physical FFN, so their duplicate logical budget is
+    removed before solving over physical expert blocks.
     """
     m = get_model_info(model_name)
     bpl = (
@@ -48,6 +48,54 @@ def compute_total_bits(model_name, bpe, bit_cands):
         (max(0, m.num_shared_experts_per_layer - 1)) * max(bit_cands)
     )
     return bpl * (m.num_layers - m.first_k_dense_layers)
+
+
+def get_fixed_shared_expert_bits(model_info, bit_cands):
+    """Fix merged shared experts at the bit assumed by the budget formula."""
+    if model_info.num_shared_experts_per_layer == 0:
+        return {}
+    return {model_info.num_routed_experts_per_layer: max(bit_cands)}
+
+
+def validate_scored_expert_count(model_info, num_scored_experts):
+    """Require one scored shared block when the model merges shared experts."""
+    expected_scored_experts = (
+        model_info.num_routed_experts_per_layer
+        + int(model_info.num_shared_experts_per_layer > 0)
+    )
+    if num_scored_experts != expected_scored_experts:
+        raise ValueError(
+            "The score file does not match GEMQ's expert representation: "
+            f"expected {expected_scored_experts} scored experts, got {num_scored_experts}"
+        )
+
+
+def validate_effective_bpe(opt_set, model_info, target_bpe, shared_bit):
+    """Verify that a merged shared block realizes the requested logical bpe."""
+    if model_info.num_shared_experts_per_layer == 0:
+        return
+
+    shared_expert_id = model_info.num_routed_experts_per_layer
+    shared_bits = [experts[shared_expert_id] for experts in opt_set.values()]
+    if any(bits != shared_bit for bits in shared_bits):
+        raise RuntimeError(
+            f"Shared experts must be {shared_bit}-bit, got {shared_bits}"
+        )
+
+    physical_bits = sum(sum(experts.values()) for experts in opt_set.values())
+    logical_bits = physical_bits + (
+        model_info.num_shared_experts_per_layer - 1
+    ) * sum(shared_bits)
+    logical_experts = len(opt_set) * (
+        model_info.num_routed_experts_per_layer
+        + model_info.num_shared_experts_per_layer
+    )
+    effective_bpe = logical_bits / logical_experts
+    if abs(effective_bpe - target_bpe) > 1e-9:
+        raise RuntimeError(
+            f"Allocation realizes {effective_bpe:.12g} bpe, expected {target_bpe:.12g}"
+        )
+    print(f"Validated effective expert budget: {effective_bpe:.6g} bpe")
 
 
 def run_gemq_solver(args):
@@ -59,14 +107,21 @@ def run_gemq_solver(args):
     total_bits = compute_total_bits(args.model_name, bpe, bit_cands)
 
     # build a solver and solve
+    fixed_expert_bits = get_fixed_shared_expert_bits(m, bit_cands)
     global_solver = GEMQSolver(
         layer_re_path=args.layer_re_path,
         x_space=bit_cands,
         extra_constr=args.extra_constr, # NOTE: this args is valid only when using x_space=(1,2,3)
         start_layer_idx=m.first_k_dense_layers,
         backend=args.ilp_backend,
+        fixed_expert_bits=fixed_expert_bits,
     )
+    validate_scored_expert_count(m, global_solver.num_experts)
     opt_set = global_solver.solve_all(total_bits=total_bits)
+    if fixed_expert_bits:
+        validate_effective_bpe(
+            opt_set, m, bpe, shared_bit=next(iter(fixed_expert_bits.values()))
+        )
 
     # auto generate the save path if not specified
     save_path = args.save_path
