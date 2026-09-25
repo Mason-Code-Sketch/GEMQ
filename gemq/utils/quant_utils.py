@@ -74,7 +74,7 @@ def create_hqq_linear_from_quantized_weights(
     meta = {
         "nbits": nbits,
         "group_size": group_size,
-        "shape": org_shape,
+        "shape": torch.Size(org_shape),
         "scale": scale,
         "zero": zero,
         "axis": 1,
