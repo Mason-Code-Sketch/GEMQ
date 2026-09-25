@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 #  Settings
 model_name="deepseek-ai/DeepSeek-V2-Lite"
 bits_per_expert=2.0  # target average bits-per-expert
