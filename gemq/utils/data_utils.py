@@ -47,14 +47,19 @@ def get_wikitext2(nsamples, seed, seqlen, model, use_fast=False, dataset_root=No
         testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=use_fast)
-    trainenc = tokenizer(" ".join(traindata["text"]), return_tensors="pt")
+    trainenc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt")
     testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
 
     import random
-    random.seed(seed)
+    available_starts = trainenc.input_ids.shape[1] - seqlen + 1
+    if nsamples > available_starts:
+        raise ValueError(
+            f"nsamples={nsamples} exceeds available unique starts={available_starts} "
+            f"for sequence length={seqlen}"
+        )
+    starts = random.Random(seed).sample(range(available_starts), nsamples)
     trainloader = []
-    for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+    for i in starts:
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
