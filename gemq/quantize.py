@@ -18,6 +18,10 @@ from gemq.utils.model_utils import *
 from gemq.utils.quant_utils import *
 from gemq.utils.eval_utils import evaluate_perplexity, run_lm_eval
 from gemq.utils.hf_loading import align_deepseek_softmax_scale
+from gemq.inference.qwen2_moe import (
+    hqq_state_from_quantized_weight,
+    replace_qwen2_moe_experts,
+)
 from gemq.resource_ledger import ResourceLedger
 
 logging.set_verbosity_error()
@@ -113,6 +117,7 @@ def collect_qwen2_expert_hessians(moe_block, inputs, quantizers):
 
 @torch.no_grad()
 def quantize_qwen2_expert_weights(moe_block, quantizers, args):
+    packed_states = {}
     for expert_id, expert_quantizers in quantizers.items():
         for projection_name, quantizer in expert_quantizers.items():
             quantized, scales, zeros = quantizer.quantize()
@@ -124,11 +129,24 @@ def quantize_qwen2_expert_weights(moe_block, quantizers, args):
                     dtype=target.dtype,
                 )
             )
+            if getattr(args, "real_quant", False):
+                packed_states.setdefault(expert_id, {})[projection_name] = (
+                    hqq_state_from_quantized_weight(
+                        quantized,
+                        scales,
+                        zeros,
+                        tuple(target.shape),
+                        quantizer.nbits,
+                        quantizer.groupsize,
+                        target.device,
+                    )
+                )
             if args.verbose:
                 print(
                     f"| mlp.experts.{expert_id}.{projection_name:<15} | "
                     f"{quantizer.nbits:<3} | {quantizer.groupsize:>4} | {'fused':>9} |"
                 )
+    return packed_states
 
 
 def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
@@ -278,6 +296,7 @@ def quantize_weights_gptq(model, dataloader, args):
     bit_cfg = build_alloc_cfg(model, args)
     model_type = NAME_TO_MODEL[args.model_name]
     qwen2_allocation = None
+    qwen2_packed_states = {}
     if model_type == ModelType.QWEN2MOE and args.mixed:
         with open(args.bit_cfg, "rb") as file:
             qwen2_allocation = pickle.load(file)
@@ -410,7 +429,11 @@ def quantize_weights_gptq(model, dataloader, args):
                 print(f"| {name:<30} | {quantizers[name].nbits:<3} | {quantizers[name].groupsize:>4} | {elapse:>9.2f} |")
 
         if qwen2_quantizers is not None:
-            quantize_qwen2_expert_weights(moe_block, qwen2_quantizers, args)
+            packed_states = quantize_qwen2_expert_weights(
+                moe_block, qwen2_quantizers, args
+            )
+            if packed_states:
+                qwen2_packed_states[i] = packed_states
 
         # compute layer outputs using quantized weights
         start = time.time()
@@ -438,7 +461,7 @@ def quantize_weights_gptq(model, dataloader, args):
 
     model.config.use_cache = use_cache  # restore
 
-    return quant_modules
+    return quant_modules, qwen2_packed_states
 
 
 def parse_args():
@@ -616,6 +639,10 @@ def parse_args():
         help="Whether to conduct real quantization and save the int weights (using HQQ)"
     )
     parser.add_argument(
+        "--eval_real_quant", action="store_true",
+        help="Evaluate HQQ-packed weights after real quantization and before saving"
+    )
+    parser.add_argument(
         "--save_path", type=str, default="",
         help="Save quantized checkpoint under this path"
     )
@@ -637,8 +664,8 @@ if __name__ == "__main__":
     print(json.dumps(vars(args), indent=4))
     resource_ledger = ResourceLedger(args.resource_output)
 
-    if args.real_quant and NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE:
-        raise ValueError("Qwen1.5-MoE-A2.7B supports fake quantization only.")
+    if args.eval_real_quant and not args.real_quant:
+        raise ValueError("--eval_real_quant requires --real_quant.")
 
     with resource_ledger.command():
         with resource_ledger.component("load_model_and_tokenizer"):
@@ -665,13 +692,16 @@ if __name__ == "__main__":
             dataloader = get_calib_loader(tokenizer, args)
 
         quant_modules = {}
+        qwen2_packed_states = {}
         if not args.eval_fp:
             print("Start quantizing model weights ...")
             quantizer = args.quantizer.lower().split("-")[0]
             if quantizer != "gptq":
                 raise ValueError(f"Unsupported weight quantizer: {args.quantizer}")
             with resource_ledger.component("quant_gptq"):
-                quant_modules = quantize_weights_gptq(model, dataloader, args)
+                quant_modules, qwen2_packed_states = quantize_weights_gptq(
+                    model, dataloader, args
+                )
 
         if args.finetune_routers:
             with resource_ledger.component("prepare_router_ft"):
@@ -744,6 +774,8 @@ if __name__ == "__main__":
                         quant_modules,
                         quant_weight=True,
                     )
+                    if NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE:
+                        replace_qwen2_moe_experts(model, qwen2_packed_states)
                     check_packing(model, quant_modules, args)
                 else:
                     for name, module in quant_modules.items():
@@ -751,6 +783,18 @@ if __name__ == "__main__":
                         module.quant_zeros = None
                         module.quant_nbits = None
                         module.quant_groupsize = None
+
+                if args.eval_real_quant:
+                    with resource_ledger.component("evaluation_real_quant"):
+                        print("Evaluating real-quant model ...")
+                        evaluate_perplexity(
+                            model,
+                            tokenizer,
+                            ["wikitext2", "c4"],
+                            args.model_name,
+                            offload=False,
+                            dataset_root=args.dataset_root,
+                        )
 
                 save_quantized_model(
                     model,

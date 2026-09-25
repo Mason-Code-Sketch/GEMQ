@@ -29,9 +29,9 @@ rft_lr=1e-4
 eval_downstream=false
 downstream_tasks="piqa,arc_easy,arc_challenge,hellaswag,winogrande,mathqa,mmlu"
 
-# Qwen1.5 stores routed experts in fused parameter tensors. GEMQ can save its
-# pseudo-quantized checkpoint, while HQQ packing is unavailable for this layout.
-real_quant=false
+# Qwen1.5 routed experts are packed as HQQ-backed modules after Router FT.
+real_quant=true
+eval_real_quant=true
 save_model=true
 
 model_args=(--model "$model" --model_name "$model_name")
@@ -60,13 +60,21 @@ fname="${bit_cfg##*/}"
 alloc_prefix="${fname%%_*}"
 prefix="${alloc_prefix}-WT2"
 if [[ "$save_model" == "true" ]]; then
-    save_path="results/fake_quant_models/${model_name}/${qtype}/${prefix}_A4-G16-D4-E${bpe}${rft_tag}"
-    io_args=(--save_path "$save_path")
+    if [[ "$real_quant" == "true" ]]; then
+        save_path="results/real_quant_models/${model_name}/${qtype}/${prefix}_A4-G16-D4-E${bpe}${rft_tag}"
+        io_args=(--real_quant --save_path "$save_path")
+    else
+        save_path="results/fake_quant_models/${model_name}/${qtype}/${prefix}_A4-G16-D4-E${bpe}${rft_tag}"
+        io_args=(--save_path "$save_path")
+    fi
     resource_output="${save_path}/resource_breakdown.json"
 else
     save_path="None"
     io_args=()
     resource_output="results/resource-records/${model_name}/${qtype}/${prefix}_A4-G16-D4-E${bpe}${rft_tag}.json"
+fi
+if [[ "$real_quant" == "true" && "$eval_real_quant" == "true" ]]; then
+    io_args+=(--eval_real_quant)
 fi
 io_args+=(--resource_output "$resource_output")
 

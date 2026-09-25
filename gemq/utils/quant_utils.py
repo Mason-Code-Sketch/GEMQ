@@ -152,8 +152,9 @@ def replace_linears(model, model_name, quant_modules, quant_weight=True):
             Q = W
 
         # Replace with HQQLinear
+        device = m.weight.device if m.weight.is_cuda else "cuda"
         hqq_linear = create_hqq_linear_from_quantized_weights(
-            Q, scales, zeros, m.weight.shape, nbits, group_size, bias=m.bias, device="cuda"
+            Q, scales, zeros, m.weight.shape, nbits, group_size, bias=m.bias, device=device
         )
         setattr_nested(layers, name, hqq_linear)
 
