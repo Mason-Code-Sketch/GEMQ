@@ -1,13 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 # Model settings
 model_name="deepseek-ai/DeepSeek-V2-Lite"
-model="deepseek-ai/DeepSeek-V2-Lite"
+model="../../models/DeepSeek-V2-Lite"
 model_str=""  # used to specify which model is used for stats computation;  empty string for using fp model
 
 # Dataset settings
 dataset="c4"
+dataset_root="../../datasets"
 nsamples=128
 seqlen=2048
 seed=0
@@ -22,6 +26,7 @@ python -m gemq.compute_model_stats \
     --model ${model} \
     --model_name ${model_name} \
     --calib_dataset ${dataset} \
+    --dataset_root ${dataset_root} \
     --seed ${seed} \
     --nsamples ${nsamples} \
     --seqlen ${seqlen} \
@@ -38,6 +43,7 @@ python -m gemq.compute_model_stats \
     --model ${model} \
     --model_name ${model_name} \
     --calib_dataset ${dataset} \
+    --dataset_root ${dataset_root} \
     --seed ${seed} \
     --nsamples ${nsamples} \
     --seqlen ${seqlen} \

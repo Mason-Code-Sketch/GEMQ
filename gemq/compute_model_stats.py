@@ -464,6 +464,10 @@ def parse_args():
         help="Which calibration dataset to use",
     )
     parser.add_argument(
+        "--dataset_root", type=str, default=None,
+        help="Optional directory containing local c4_gptq_new_seed0 and wikitext2 DatasetDicts",
+    )
+    parser.add_argument(
         "--nsamples", type=int, default=128,
         help="Number of calibration sequences"
     )

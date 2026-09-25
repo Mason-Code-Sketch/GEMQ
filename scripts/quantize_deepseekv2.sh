@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 # NOTE: DeepSeek-V2-Lite has two implementations: HuggingFace Transformers' built-in one
 # and the official one shipped with the weights (trust_remote_code).
 #
@@ -16,13 +19,14 @@ set -euo pipefail
 #  Model settings
 # ===============================
 model_name="deepseek-ai/DeepSeek-V2-Lite"
-model="deepseek-ai/DeepSeek-V2-Lite"
+model="../../models/DeepSeek-V2-Lite"
 use_official_impl=true     # use official modeling code (set false to use HF Transformers implementation)
 
 # ===============================
 #  Dataset settings
 # ===============================
 calib_dataset="wikitext2"
+dataset_root="../../datasets"
 nsamples=128
 seqlen=2048
 
@@ -65,7 +69,7 @@ if [[ "${use_official_impl}" == "true" ]]; then
     model_args+=(--trust_remote_code)
 fi
 
-data_args=(--calib_dataset "$calib_dataset" --nsamples "$nsamples" --seqlen "$seqlen")
+data_args=(--calib_dataset "$calib_dataset" --dataset_root "$dataset_root" --nsamples "$nsamples" --seqlen "$seqlen")
 
 bpe_int=$(printf "%.0f" "$bpe")
 quant_args=(--quantizer "$quantizer" --expert_wbits "$bpe_int" --groupsize 128 --mse --reproduce_mcmoe)

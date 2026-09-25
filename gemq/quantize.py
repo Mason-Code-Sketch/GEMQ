@@ -295,6 +295,10 @@ def parse_args():
         help="Which calibration dataset to use",
     )
     parser.add_argument(
+        "--dataset_root", type=str, default=None,
+        help="Optional directory containing local c4_gptq_new_seed0 and wikitext2 DatasetDicts",
+    )
+    parser.add_argument(
         "--nsamples", type=int, default=128,
         help="Number of calibration sequences"
     )
@@ -474,7 +478,10 @@ if __name__ == "__main__":
         model = dispatch_model_to_all_devices(model)
         
         print("Evaluating quantized model before fine-tuning ...")
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False)
+        evaluate_perplexity(
+            model, tokenizer, ["wikitext2", "c4"], args.model_name,
+            offload=False, dataset_root=args.dataset_root,
+        )
 
         print("Fine-tuning routers ...")
         finetune_routers(model, dataloader, args)
@@ -487,7 +494,10 @@ if __name__ == "__main__":
         if not args.finetune_routers:
             model = dispatch_model_to_all_devices(model)
 
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=False)
+        evaluate_perplexity(
+            model, tokenizer, ["wikitext2", "c4"], args.model_name,
+            offload=False, dataset_root=args.dataset_root,
+        )
         if args.eval_downstream:
             if args.disable_cache:
                 model.config.use_cache = False
@@ -500,7 +510,10 @@ if __name__ == "__main__":
                 print("Downstream evaluation failed. Skipping ...")
     else:
         # memory-efficient evaluation with layer offloading
-        evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name, offload=True)
+        evaluate_perplexity(
+            model, tokenizer, ["wikitext2", "c4"], args.model_name,
+            offload=True, dataset_root=args.dataset_root,
+        )
 
     # save model
     if args.save_path:
