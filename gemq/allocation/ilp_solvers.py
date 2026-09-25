@@ -30,6 +30,7 @@ class GEMQSolver:
         extra_constr="",
         start_layer_idx=0,
         backend="highs",
+        fixed_expert_bits=None,
     ):
         if backend not in AVAILABLE_BACKENDS:
             raise ValueError(
@@ -53,6 +54,16 @@ class GEMQSolver:
 
         self.backend = backend
         self.last_objective = None
+        self.fixed_expert_bits = dict(fixed_expert_bits or {})
+        for expert_id, bitwidth in self.fixed_expert_bits.items():
+            if not 0 <= expert_id < self.num_experts:
+                raise ValueError(
+                    f"Fixed expert id {expert_id} is out of range for {self.num_experts} experts"
+                )
+            if bitwidth not in self.x_space:
+                raise ValueError(
+                    f"Fixed bitwidth {bitwidth} is not in x_space={self.x_space}"
+                )
 
     @property
     def num_vars(self):
@@ -131,6 +142,19 @@ class GEMQSolver:
         else:
             A_lb = sp.csr_matrix((0, n))
             b_lb = np.zeros(0)
+
+        if self.fixed_expert_bits:
+            rows, cols = [], []
+            for expert_id, bitwidth in self.fixed_expert_bits.items():
+                bit_idx = self.x_space.index(bitwidth)
+                for li in range(L):
+                    rows.append(len(rows))
+                    cols.append((li * E + expert_id) * K + bit_idx)
+            A_fixed = sp.csr_matrix(
+                (np.ones(len(rows)), (rows, cols)), shape=(len(rows), n)
+            )
+            A_eq = sp.vstack([A_eq, A_fixed], format="csr")
+            b_eq = np.concatenate([b_eq, np.ones(len(rows))])
 
         return (A_ub, b_ub), (A_eq, b_eq), (A_lb, b_lb)
 
