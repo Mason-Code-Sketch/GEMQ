@@ -2,11 +2,13 @@
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 from transformers import Qwen2MoeConfig
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
 
+from gemq import compute_model_stats
 from gemq.quantize import (
     capture_router_finetune_state,
     get_qwen2_expert_bits,
@@ -68,6 +70,17 @@ class _TinyQwenModel(torch.nn.Module):
         self.model.layers = torch.nn.ModuleList([_TinyQwenLayer(moe_block)])
 
 
+class _LoadedModel:
+    def __init__(self):
+        self.config = SimpleNamespace()
+
+    def train(self):
+        return self
+
+    def eval(self):
+        return self
+
+
 class Qwen15AdaptationTest(unittest.TestCase):
     def test_fused_block_has_tensor_output_and_expert_count_on_experts(self):
         block = _make_qwen_moe_block()
@@ -105,6 +118,62 @@ class Qwen15AdaptationTest(unittest.TestCase):
         block.gate.num_experts = 60
         block.gate.weight = torch.nn.Parameter(torch.empty(60, 16))
         validate_qwen2_moe_model(model, "Qwen/Qwen1.5-MoE-A2.7B")
+
+    def test_layer_grads_validates_layout_before_loading_calibration(self):
+        model = _LoadedModel()
+        args = SimpleNamespace(
+            resource_output="",
+            model="unused",
+            use_fast=False,
+            mode="layer_grads",
+            model_dtype=torch.float16,
+            attn_impl="eager",
+            seqlen=16,
+            model_name="Qwen/Qwen1.5-MoE-A2.7B",
+        )
+        calls = []
+
+        def record_validation(*_args):
+            calls.append("validate")
+
+        def record_calibration(*_args):
+            calls.append("calibration")
+            return []
+
+        def record_gradients(*_args):
+            calls.append("layer_grads")
+
+        with (
+            patch.object(
+                compute_model_stats.AutoTokenizer,
+                "from_pretrained",
+                return_value=object(),
+            ),
+            patch.object(
+                compute_model_stats.AutoModelForCausalLM,
+                "from_pretrained",
+                return_value=model,
+            ),
+            patch.object(compute_model_stats, "align_deepseek_softmax_scale"),
+            patch.object(
+                compute_model_stats,
+                "validate_qwen2_moe_model",
+                side_effect=record_validation,
+            ),
+            patch.object(
+                compute_model_stats,
+                "get_calib_loader",
+                side_effect=record_calibration,
+            ),
+            patch.object(
+                compute_model_stats,
+                "compute_layer_grads",
+                side_effect=record_gradients,
+            ),
+        ):
+            compute_model_stats.main(args)
+
+        self.assertEqual(calls, ["validate", "calibration", "layer_grads"])
 
     def test_gate_stats_uses_fused_weight_expert_count(self):
         block = _make_qwen_moe_block()

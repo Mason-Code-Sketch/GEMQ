@@ -699,6 +699,7 @@ def main(args) -> None:
             )
             align_deepseek_softmax_scale(model)
             model.seqlen = args.seqlen
+            validate_qwen2_moe_model(model, args.model_name)
             if args.mode == "layer_grads":
                 model.train()
             else:

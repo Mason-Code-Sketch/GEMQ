@@ -658,6 +658,7 @@ if __name__ == "__main__":
             align_deepseek_softmax_scale(model)
             model.seqlen = 2048
             model.eval()
+            validate_qwen2_moe_model(model, args.model_name)
 
         with resource_ledger.component("load_calibration"):
             print("Loading calibration data ...")
