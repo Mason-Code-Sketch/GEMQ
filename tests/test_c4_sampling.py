@@ -69,10 +69,16 @@ class C4SamplingTest(unittest.TestCase):
         class _EndpointRandom:
             def __init__(self, _seed):
                 self.values = iter([1, 4])
+                self.calls = 0
 
             def randint(self, lower, upper):
+                self.calls += 1
                 value = next(self.values)
-                if value != upper or value < lower:
+                if value < lower or value > upper:
+                    raise AssertionError(
+                        f"expected value within [{lower}, {upper}], got {value}"
+                    )
+                if self.calls == 2 and value != upper:
                     raise AssertionError(
                         f"expected inclusive upper bound {upper}, got {value}"
                     )
