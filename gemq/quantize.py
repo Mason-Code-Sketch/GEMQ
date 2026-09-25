@@ -1,7 +1,6 @@
 import os
 import argparse
 import time
-import math
 import gc
 import json
 import pickle
@@ -50,13 +49,31 @@ def make_gptq_quantizer(weight, name, wbits, args):
     )
 
 
-def get_qwen2_expert_bits(args, allocation, layer_idx):
+def get_qwen2_expert_bits(args, allocation, layer_idx, num_routed_experts):
+    num_scored_experts = num_routed_experts + 1
     if not args.mixed:
-        return [args.expert_wbits] * 61
-    return [allocation[layer_idx][expert_id] for expert_id in range(61)]
+        return [args.expert_wbits] * num_scored_experts
+    if allocation is None:
+        raise ValueError("Mixed Qwen1.5 quantization requires a bit allocation.")
+    layer_allocation = allocation[layer_idx]
+    expected_expert_ids = set(range(num_scored_experts))
+    actual_expert_ids = set(layer_allocation)
+    if actual_expert_ids != expected_expert_ids:
+        raise ValueError(
+            f"Qwen1.5 layer {layer_idx} allocation has expert ids "
+            f"{sorted(actual_expert_ids)}, expected {sorted(expected_expert_ids)}."
+        )
+    return [layer_allocation[expert_id] for expert_id in range(num_scored_experts)]
 
 
 def build_qwen2_expert_quantizers(moe_block, expert_bits, args):
+    num_routed_experts = get_qwen2_num_routed_experts(moe_block)
+    if len(expert_bits) != num_routed_experts + 1:
+        raise ValueError(
+            "Qwen1.5 expert bit allocation must include every routed expert and "
+            f"one shared expert, got {len(expert_bits)} entries for "
+            f"{num_routed_experts} routed experts."
+        )
     quantizers = {}
     for expert_id, bitwidth in enumerate(expert_bits[:-1]):
         if bitwidth >= 16:
@@ -100,7 +117,13 @@ def quantize_qwen2_expert_weights(moe_block, quantizers, args):
         for projection_name, quantizer in expert_quantizers.items():
             quantized, scales, zeros = quantizer.quantize()
             dequantized = quantizer.dequantize(quantized, scales, zeros)
-            getattr(moe_block.experts, projection_name)[expert_id].copy_(dequantized)
+            target = getattr(moe_block.experts, projection_name)[expert_id]
+            target.copy_(
+                dequantized.reshape_as(target).to(
+                    device=target.device,
+                    dtype=target.dtype,
+                )
+            )
             if args.verbose:
                 print(
                     f"| mlp.experts.{expert_id}.{projection_name:<15} | "
@@ -120,6 +143,59 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
         model = model.to(dtype)
         tokenizer.save_pretrained(save_path)
         model.save_pretrained(save_path)
+
+
+def capture_router_finetune_state(model, router_params):
+    """Capture identity-based router and frozen-parameter checks before AdamW."""
+    router_ids = {id(param) for param in router_params}
+    if not router_ids:
+        raise RuntimeError("No router parameters were selected for fine-tuning.")
+    if len(router_ids) != len(router_params):
+        raise RuntimeError("Router parameter selection contains duplicates.")
+
+    return {
+        "router_ids": router_ids,
+        "router_snapshots": {
+            id(param): param.detach().clone() for param in router_params
+        },
+        # Optimizer in-place updates increment Tensor._version. Recording versions
+        # avoids cloning every frozen parameter in a large MoE model.
+        "frozen_versions": {
+            id(param): param._version
+            for param in model.parameters()
+            if id(param) not in router_ids
+        },
+    }
+
+
+def validate_router_finetune_state(model, router_params, state):
+    """Verify that AdamW changed router parameters and no frozen parameter."""
+    parameters_by_id = {id(param): param for param in model.parameters()}
+    router_ids = state["router_ids"]
+    if set(parameters_by_id).intersection(router_ids) != router_ids:
+        raise RuntimeError("A selected router parameter is no longer present in the model.")
+
+    changed_frozen = [
+        parameter_id
+        for parameter_id, version in state["frozen_versions"].items()
+        if parameters_by_id[parameter_id]._version != version
+    ]
+    if changed_frozen:
+        raise RuntimeError("Frozen parameters changed during router fine-tuning.")
+
+    max_router_update = max(
+        (
+            (parameters_by_id[parameter_id].detach() - before)
+            .abs()
+            .max()
+            .item()
+            for parameter_id, before in state["router_snapshots"].items()
+        ),
+        default=0.0,
+    )
+    if max_router_update <= 0.0:
+        raise RuntimeError("Routers did not change during fine-tuning.")
+    return max_router_update
 
 
 def finetune_routers(model, dataloader, args):
@@ -147,15 +223,9 @@ def finetune_routers(model, dataloader, args):
     for p in router_params:
         p.requires_grad = True
 
-    # sanity check
-    org_pmean, org_gmean = 0.0, 0.0
-    for name, param in model.named_parameters():
-        if get_module_type(name, args.model_name) == LinearModuleType.GATE:
-            org_gmean += param.mean().item()
-        else:
-            org_pmean += param.mean().item()
+    sanity_state = capture_router_finetune_state(model, router_params)
     if args.verbose:
-        print("Router stats before fine-tuning:", org_gmean)
+        print("Router parameters selected for fine-tuning:", len(router_params))
 
     # start fine-tuning
     optimizer = torch.optim.AdamW(router_params, lr=args.rft_lr, weight_decay=args.rft_wd)
@@ -180,18 +250,12 @@ def finetune_routers(model, dataloader, args):
 
         # sanity check
         if epoch == 0:
-            pmean, gmean = 0., 0.
-            for name, param in model.named_parameters():
-                if get_module_type(name, args.model_name) == LinearModuleType.GATE:
-                    gmean += param.mean().item()
-                else:
-                    pmean += param.mean().item()
-
-            assert math.fabs(org_pmean - pmean) < 1e-8, "Other parameters are changing during router fine-tuning!"
-            assert math.fabs(org_gmean - gmean) > 1e-10, "Routers are not changing during fine-tuning!"
+            max_router_update = validate_router_finetune_state(
+                model, router_params, sanity_state
+            )
             print("Sanity check passed!")
             if args.verbose:
-                print("Sum of routers params after finetuning:", gmean)
+                print("Max router parameter update:", max_router_update)
 
     # restore
     model = model.to(org_dtype)
@@ -223,6 +287,7 @@ def quantize_weights_gptq(model, dataloader, args):
 
     # retrieve decoder blocks
     layers = get_blocks(model, args.model_name)
+    validate_qwen2_moe_model(model, args.model_name)
 
     # perform quantization for each block
     quant_modules = {}
@@ -240,6 +305,10 @@ def quantize_weights_gptq(model, dataloader, args):
         moe_block = (
             get_moe_block(layer, args.model_name)
             if model_type == ModelType.QWEN2MOE else None
+        )
+        qwen2_num_routed_experts = (
+            get_qwen2_num_routed_experts(moe_block)
+            if moe_block is not None else None
         )
 
         # create a quantizer for each linear module that requires quantization
@@ -294,14 +363,19 @@ def quantize_weights_gptq(model, dataloader, args):
         if model_type == ModelType.QWEN2MOE:
             qwen2_quantizers = build_qwen2_expert_quantizers(
                 moe_block,
-                get_qwen2_expert_bits(args, qwen2_allocation, i),
+                get_qwen2_expert_bits(
+                    args, qwen2_allocation, i, qwen2_num_routed_experts
+                ),
                 args,
             )
             qwen2_handle = moe_block.register_forward_pre_hook(
                 partial(collect_qwen2_expert_hessians, quantizers=qwen2_quantizers)
             )
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j: j+1], **layer_kwargs)[0]
+            batch_inps = inps[j: j+1]
+            outs[j] = get_decoder_hidden_states(
+                layer(batch_inps, **layer_kwargs), batch_inps.shape
+            )
         for h in handles:
             h.remove()
         if qwen2_handle is not None:
@@ -342,7 +416,10 @@ def quantize_weights_gptq(model, dataloader, args):
         start = time.time()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j: j+1], **layer_kwargs)[0]
+            batch_inps = inps[j: j+1]
+            outs[j] = get_decoder_hidden_states(
+                layer(batch_inps, **layer_kwargs), batch_inps.shape
+            )
 
         elapse = time.time() - start
         if args.verbose:

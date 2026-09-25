@@ -200,6 +200,79 @@ def get_named_linears(module):
     }
 
 
+def get_decoder_hidden_states(output, expected_shape=None):
+    """Extract decoder hidden states across tuple- and Tensor-returning blocks."""
+    hidden_states = output[0] if isinstance(output, (tuple, list)) else output
+    if not isinstance(hidden_states, torch.Tensor):
+        raise TypeError(
+            "Decoder layer output must be a Tensor or a tuple/list whose first item is a Tensor, "
+            f"got {type(hidden_states)!r}."
+        )
+
+    if expected_shape is not None:
+        expected_shape = tuple(expected_shape)
+        if tuple(hidden_states.shape) != expected_shape:
+            raise RuntimeError(
+                "Decoder layer output shape does not match its input shape: "
+                f"got {tuple(hidden_states.shape)}, expected {expected_shape}."
+            )
+    return hidden_states
+
+
+def get_qwen2_num_routed_experts(moe_block):
+    """Read the routed-expert count from Qwen1.5's fused expert tensors."""
+    try:
+        gate_up_proj = moe_block.experts.gate_up_proj
+        down_proj = moe_block.experts.down_proj
+    except AttributeError as error:
+        raise TypeError(
+            "Qwen1.5 fused MoE block must expose experts.gate_up_proj and "
+            "experts.down_proj."
+        ) from error
+
+    if gate_up_proj.ndim != 3 or down_proj.ndim != 3:
+        raise ValueError(
+            "Qwen1.5 fused expert weights must be rank-3 tensors, got "
+            f"gate_up_proj={tuple(gate_up_proj.shape)} and down_proj={tuple(down_proj.shape)}."
+        )
+    num_routed_experts = gate_up_proj.shape[0]
+    if down_proj.shape[0] != num_routed_experts:
+        raise ValueError(
+            "Qwen1.5 fused expert tensors disagree on routed-expert count: "
+            f"gate_up_proj={num_routed_experts}, down_proj={down_proj.shape[0]}."
+        )
+
+    declared_count = getattr(moe_block.experts, "num_experts", None)
+    if declared_count is not None and declared_count != num_routed_experts:
+        raise ValueError(
+            "Qwen1.5 experts.num_experts disagrees with fused weight tensors: "
+            f"declared={declared_count}, tensors={num_routed_experts}."
+        )
+    return int(num_routed_experts)
+
+
+def validate_qwen2_moe_model(model, model_name):
+    """Fail early when the loaded Qwen1.5 MoE layout differs from this adapter."""
+    if NAME_TO_MODEL[model_name] != ModelType.QWEN2MOE:
+        return
+
+    expected_routed_experts = get_model_info(model_name).num_routed_experts_per_layer
+    for layer_idx, layer in enumerate(get_blocks(model, model_name)):
+        moe_block = get_moe_block(layer, model_name)
+        actual_routed_experts = get_qwen2_num_routed_experts(moe_block)
+        if actual_routed_experts != expected_routed_experts:
+            raise ValueError(
+                f"Qwen1.5 layer {layer_idx} has {actual_routed_experts} routed experts; "
+                f"the configured model requires {expected_routed_experts}."
+            )
+        if not hasattr(moe_block, "shared_expert") or not hasattr(
+            moe_block, "shared_expert_gate"
+        ):
+            raise TypeError(
+                f"Qwen1.5 layer {layer_idx} is missing the expected shared-expert modules."
+            )
+
+
 def get_moe_block(layer, model_name):
     """
     Get the MoE block from a decoder layer.
@@ -333,7 +406,11 @@ def get_expert_id(name, model_name):
     elif model_type == ModelType.DEEPSEEKV2:
         exp_id = 64 if "shared_experts" in name else int(name.split(".")[-2])
     elif model_type == ModelType.QWEN2MOE:
-        exp_id = 60 if "shared_expert" in name else int(name.split(".")[-2])
+        exp_id = (
+            get_model_info(model_name).num_routed_experts_per_layer
+            if "shared_expert" in name
+            else int(name.split(".")[-2])
+        )
 
     return exp_id
 
@@ -576,10 +653,13 @@ def compute_gate_stats_hook_qwen2moe(m, x, y, inps, outs, weights, counts):
     hidden_states = x[0]
     flat_hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
     _, routing_weights, selected_experts = m.gate(flat_hidden_states)
+    num_routed_experts = get_qwen2_num_routed_experts(m)
 
-    actw = torch.zeros(m.num_experts, device=flat_hidden_states.device)
+    actw = torch.zeros(num_routed_experts, device=flat_hidden_states.device)
     actw.scatter_add_(0, selected_experts.reshape(-1), routing_weights.reshape(-1))
-    actc = torch.zeros(m.num_experts, dtype=torch.long, device=flat_hidden_states.device)
+    actc = torch.zeros(
+        num_routed_experts, dtype=torch.long, device=flat_hidden_states.device
+    )
     actc.scatter_add_(
         0,
         selected_experts.reshape(-1),

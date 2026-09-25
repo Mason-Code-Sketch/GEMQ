@@ -7,7 +7,12 @@ import torch.nn.functional as F
 from datasets import load_dataset
 
 from gemq.utils.data_utils import _load_split
-from gemq.utils.model_utils import get_blocks, move_embed, move_head
+from gemq.utils.model_utils import (
+    get_blocks,
+    get_decoder_hidden_states,
+    move_embed,
+    move_head,
+)
 
 
 def get_testenc(tokenizer, dataset, seqlen, dataset_root=None):
@@ -111,7 +116,10 @@ def compute_perplexity_offload(model, model_name, input_ids, dataset_name):
     for i in tqdm(range(len(layers)), desc=f"Evaluating [{dataset_name}]"):
         layer = layers[i].to("cuda")
         for j in range(nsamples):
-            outs[j] = layer(inps[j: j+1], **layer_kwargs)[0]
+            batch_inps = inps[j: j+1]
+            outs[j] = get_decoder_hidden_states(
+                layer(batch_inps, **layer_kwargs), batch_inps.shape
+            )
         layers[i] = layer.cpu()
         gc.collect()
         torch.cuda.empty_cache()

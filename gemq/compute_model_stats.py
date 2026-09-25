@@ -52,6 +52,7 @@ def get_stats(model, enc, args):
 
     # retrieve blocks that require quantization
     layers = get_blocks(model, model_name)
+    validate_qwen2_moe_model(model, model_name)
 
     # get input and kwargs to the first layer decoding layer
     inps = []
@@ -97,7 +98,10 @@ def get_stats(model, enc, args):
             
             # still need to forward it to get inputs for the next layer
             for j in range(num_batches):
-                outs[j] = layer(inps[j], **layer_kwargs)[0]  # (bsz, seqlen, hidden_size)
+                batch_inps = inps[j]
+                outs[j] = get_decoder_hidden_states(
+                    layer(batch_inps, **layer_kwargs), batch_inps.shape
+                )
             layers[i] = layer.to("cpu")
             gc.collect()
             torch.cuda.empty_cache()
@@ -116,7 +120,10 @@ def get_stats(model, enc, args):
             partial(gate_stats_hook_fn, inps=block_inps, outs=block_outs, weights=_weights, counts=_counts)
         )
         for j in range(num_batches):
-            outs[j] = layer(inps[j], **layer_kwargs)[0]  # (bsz, seqlen, hidden_size)
+            batch_inps = inps[j]
+            outs[j] = get_decoder_hidden_states(
+                layer(batch_inps, **layer_kwargs), batch_inps.shape
+            )
         act_weights[i] = sum(_weights)  # (num_routed_experts + 1 if has_shared_expert else 0,)
         act_counts[i] = sum(_counts)    # (num_routed_experts + 1 if has_shared_expert else 0,)
         # remove hook
@@ -278,7 +285,7 @@ def compute_qwen2_moe_layer_reconstruction_errors(
 ):
     """Score Qwen1.5 routed experts stored in fused parameter tensors."""
     layer_quant_loss = defaultdict(dict)
-    num_routed_experts = moe_block.num_experts
+    num_routed_experts = get_qwen2_num_routed_experts(moe_block)
 
     for expert_id in range(num_routed_experts + 1):
         if expert_id == num_routed_experts:
@@ -338,7 +345,7 @@ def compute_qwen2_moe_quantization_losses(
 ):
     """Compute MC-MoE-style output losses for Qwen1.5 fused experts."""
     layer_quant_loss = defaultdict(dict)
-    num_routed_experts = moe_block.num_experts
+    num_routed_experts = get_qwen2_num_routed_experts(moe_block)
 
     for expert_id in range(num_routed_experts + 1):
         if expert_id == num_routed_experts:
@@ -428,6 +435,7 @@ def compute_faster_layer_re(model, dataloader, args):
 
     # retrieve decoder blocks
     layers = get_blocks(model, model_name)
+    validate_qwen2_moe_model(model, model_name)
 
     # get input and kwargs to the first layer decoding layer
     inps = []
@@ -473,7 +481,10 @@ def compute_faster_layer_re(model, dataloader, args):
         if model_type == ModelType.DEEPSEEKV2 and i == 0:
             # still need to forward it to get inputs for the next layer
             for j in range(num_samples // fwd_bsz):
-                outs[j * fwd_bsz:(j + 1) * fwd_bsz] = layer(inps[j * fwd_bsz:(j + 1) * fwd_bsz], **layer_kwargs)[0]  # (bsz, seqlen, hidden_size)
+                batch_inps = inps[j * fwd_bsz:(j + 1) * fwd_bsz]
+                outs[j * fwd_bsz:(j + 1) * fwd_bsz] = get_decoder_hidden_states(
+                    layer(batch_inps, **layer_kwargs), batch_inps.shape
+                )
             layers[i] = layer.to("cpu")
             gc.collect()
             torch.cuda.empty_cache()
@@ -488,7 +499,10 @@ def compute_faster_layer_re(model, dataloader, args):
         block_inps, block_outs = [], []
         handle = moe_block.register_forward_hook(partial(get_inout_hook, inps=block_inps, outs=block_outs))
         for j in range(num_samples // fwd_bsz):
-            outs[j * fwd_bsz:(j + 1) * fwd_bsz] = layer(inps[j * fwd_bsz:(j + 1) * fwd_bsz], **layer_kwargs)[0]  # (bsz, seqlen, hidden_size)
+            batch_inps = inps[j * fwd_bsz:(j + 1) * fwd_bsz]
+            outs[j * fwd_bsz:(j + 1) * fwd_bsz] = get_decoder_hidden_states(
+                layer(batch_inps, **layer_kwargs), batch_inps.shape
+            )
         block_inps = torch.cat(block_inps, dim=0)  # (num_samples, seqlen, hidden_size)
         block_outs = torch.cat(block_outs, dim=0)  # (num_samples, seqlen, hidden_size)
         handle.remove()
