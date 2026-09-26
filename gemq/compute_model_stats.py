@@ -17,7 +17,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, logging
 from gemq.utils.data_utils import get_calib_loader
 from gemq.utils.model_utils import *
 from gemq.quantizers.rtn import MCMoeRTNWeightQuantizer
-from gemq.utils.hf_loading import align_deepseek_softmax_scale
+from gemq.utils.hf_loading import (
+    align_deepseek_softmax_scale,
+    ensure_deepseek_v2_remote_code_compat,
+)
 from gemq.resource_ledger import ResourceLedger
 
 logging.set_verbosity_error()
@@ -690,6 +693,8 @@ def main(args) -> None:
     resource_ledger = ResourceLedger(args.resource_output)
     with resource_ledger.command():
         with resource_ledger.component("load_model_and_tokenizer"):
+            if args.model_name == "deepseek-ai/DeepSeek-V2-Lite":
+                ensure_deepseek_v2_remote_code_compat()
             tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=args.use_fast)
             model = AutoModelForCausalLM.from_pretrained(
                 args.model,
