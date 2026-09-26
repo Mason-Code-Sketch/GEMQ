@@ -17,7 +17,10 @@ from gemq.utils.data_utils import get_calib_loader
 from gemq.utils.model_utils import *
 from gemq.utils.quant_utils import *
 from gemq.utils.eval_utils import evaluate_perplexity, run_lm_eval
-from gemq.utils.hf_loading import align_deepseek_softmax_scale
+from gemq.utils.hf_loading import (
+    align_deepseek_softmax_scale,
+    ensure_deepseek_v2_remote_code_compat,
+)
 from gemq.inference.qwen2_moe import (
     hqq_state_from_quantized_weight,
     replace_qwen2_moe_experts,
@@ -670,6 +673,8 @@ if __name__ == "__main__":
     with resource_ledger.command():
         with resource_ledger.component("load_model_and_tokenizer"):
             print("Loading model ...")
+            if args.trust_remote_code and args.model_name == "deepseek-ai/DeepSeek-V2-Lite":
+                ensure_deepseek_v2_remote_code_compat()
             tokenizer = AutoTokenizer.from_pretrained(
                 args.model,
                 use_fast=args.use_fast,

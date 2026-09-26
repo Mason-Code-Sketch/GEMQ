@@ -18,6 +18,20 @@ import torch
 import transformers
 
 
+def ensure_deepseek_v2_remote_code_compat():
+    """Provide a removed Transformers utility required by DeepSeek-V2's remote code."""
+    from transformers.utils import import_utils
+
+    if hasattr(import_utils, "is_torch_fx_available"):
+        return
+
+    # The official model only uses this on Torch versions older than 1.13.
+    def is_torch_fx_available():
+        return False
+
+    import_utils.is_torch_fx_available = is_torch_fx_available
+
+
 def _as_module_dir(path):
     """hqq passes `<checkpoint>/config.json`; resolving an auto_map needs the directory."""
     if not isinstance(path, (str, os.PathLike)):
