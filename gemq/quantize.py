@@ -20,6 +20,7 @@ from gemq.utils.eval_utils import evaluate_perplexity, run_lm_eval
 from gemq.utils.hf_loading import (
     align_deepseek_softmax_scale,
     ensure_deepseek_v2_remote_code_compat,
+    normalize_legacy_tied_weights_for_serialization,
 )
 from gemq.inference.qwen2_moe import (
     hqq_state_from_quantized_weight,
@@ -162,6 +163,7 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
     else:
         dtype = torch.float16 if save_dtype == "float16" else torch.bfloat16
         model = model.to(dtype)
+        normalize_legacy_tied_weights_for_serialization(model)
         tokenizer.save_pretrained(save_path)
         model.save_pretrained(save_path)
 

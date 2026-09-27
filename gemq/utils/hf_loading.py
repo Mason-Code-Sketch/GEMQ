@@ -32,6 +32,21 @@ def ensure_deepseek_v2_remote_code_compat():
     import_utils.is_torch_fx_available = is_torch_fx_available
 
 
+def normalize_legacy_tied_weights_for_serialization(model):
+    """Adapt untied remote-code models to Transformers 5 serialization."""
+    for module in model.modules():
+        tied_weight_keys = getattr(module, "_tied_weights_keys", None)
+        if not isinstance(tied_weight_keys, list):
+            continue
+
+        if getattr(getattr(module, "config", None), "tie_word_embeddings", False):
+            raise ValueError(
+                "Transformers 5 requires a mapping for tied _tied_weights_keys; "
+                "the legacy list cannot be serialized safely."
+            )
+        module._tied_weights_keys = {}
+
+
 def _as_module_dir(path):
     """hqq passes `<checkpoint>/config.json`; resolving an auto_map needs the directory."""
     if not isinstance(path, (str, os.PathLike)):
