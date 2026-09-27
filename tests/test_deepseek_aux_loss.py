@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 import unittest
 
+import torch
 import torch.nn as nn
 
 from gemq.utils.model_utils import disable_deepseek_aux_loss
@@ -12,6 +13,22 @@ class _Gate(nn.Module):
     def __init__(self, alpha=0.001):
         super().__init__()
         self.alpha = alpha
+
+
+class AddAuxiliaryLoss(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, loss):
+        assert loss.numel() == 1
+        ctx.dtype = loss.dtype
+        ctx.required_aux_loss = loss.requires_grad
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_loss = None
+        if ctx.required_aux_loss:
+            grad_loss = torch.ones(1, dtype=ctx.dtype, device=grad_output.device)
+        return grad_output, grad_loss
 
 
 class _MoeMlp(nn.Module):
@@ -49,6 +66,10 @@ class DeepSeekAuxLossTest(unittest.TestCase):
         self.assertEqual(disabled_gates, 2)
         self.assertEqual(model.model.layers[1].mlp.gate.alpha, 0.0)
         self.assertEqual(model.model.layers[2].mlp.gate.alpha, 0.0)
+
+        inputs = torch.ones(2, requires_grad=True)
+        AddAuxiliaryLoss.apply(inputs, None).sum().backward()
+        self.assertTrue(torch.equal(inputs.grad, torch.ones_like(inputs)))
 
     def test_rejects_an_unrecognized_deepseek_gate_layout(self):
         model = _Model([_DenseMlp(), nn.Module()])

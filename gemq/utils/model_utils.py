@@ -1,4 +1,5 @@
 import gc
+import sys
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -304,6 +305,39 @@ def get_moe_block(layer, model_name):
     return moe_block
 
 
+def _allow_none_deepseek_aux_loss(moe_block):
+    """Let official DeepSeek's training path run after auxiliary loss is disabled."""
+    module = sys.modules.get(type(moe_block).__module__)
+    auxiliary_loss = getattr(module, "AddAuxiliaryLoss", None)
+    if auxiliary_loss is None:
+        raise RuntimeError(
+            "Official DeepSeek MoE block does not expose AddAuxiliaryLoss."
+        )
+    if getattr(auxiliary_loss, "_gemq_allows_none_aux_loss", False):
+        return
+
+    original_forward = auxiliary_loss.forward
+    original_backward = auxiliary_loss.backward
+
+    @staticmethod
+    def forward(ctx, x, loss):
+        if loss is None:
+            ctx.gemq_has_auxiliary_loss = False
+            return x
+        ctx.gemq_has_auxiliary_loss = True
+        return original_forward(ctx, x, loss)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if not ctx.gemq_has_auxiliary_loss:
+            return grad_output, None
+        return original_backward(ctx, grad_output)
+
+    auxiliary_loss.forward = forward
+    auxiliary_loss.backward = backward
+    auxiliary_loss._gemq_allows_none_aux_loss = True
+
+
 def disable_deepseek_aux_loss(model, model_name):
     """Disable auxiliary load-balancing gradients in official DeepSeek MoE gates."""
     if NAME_TO_MODEL[model_name] != ModelType.DEEPSEEKV2:
@@ -318,6 +352,7 @@ def disable_deepseek_aux_loss(model, model_name):
             raise RuntimeError(
                 f"DeepSeek MoE gate at layer {layer_idx} does not expose alpha."
             )
+        _allow_none_deepseek_aux_loss(get_moe_block(layer, model_name))
         gate.alpha = 0.0
         disabled_gates += 1
 
