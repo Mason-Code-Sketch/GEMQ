@@ -24,7 +24,7 @@ class _Tokenizer:
         return SimpleNamespace(input_ids=torch.arange(len(text) + 1).reshape(1, -1))
 
 
-def test_wikitext2_calibration_matches_moe_ptq_corpus_windows():
+def test_wikitext2_calibration_uses_gemq_train_text_joining():
     train = _Split([{"text": "abcdefgh"}, {"text": "ijklmnop"}])
     test = _Split([{"text": "qrst"}, {"text": "uvwx"}])
     tokenizer = _Tokenizer()
@@ -41,10 +41,10 @@ def test_wikitext2_calibration_matches_moe_ptq_corpus_windows():
             dataset_root="unused",
         )
 
-    train_tokens = torch.arange(len("abcdefgh\n\nijklmnop") + 1)
+    train_tokens = torch.arange(len("abcdefgh ijklmnop") + 1)
     starts = random.Random(42).sample(range(train_tokens.numel() - 4 + 1), 4)
 
-    assert tokenizer.texts == ["abcdefgh\n\nijklmnop", "qrst\n\nuvwx"]
+    assert tokenizer.texts == ["abcdefgh ijklmnop", "qrst\n\nuvwx"]
     assert torch.equal(testenc.input_ids[0], torch.arange(len("qrst\n\nuvwx") + 1))
     assert len(starts) == len(set(starts))
     for (input_ids, targets), start in zip(loader, starts):
