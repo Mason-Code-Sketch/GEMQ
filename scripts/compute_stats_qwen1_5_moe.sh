@@ -16,6 +16,7 @@ nsamples=128
 seqlen=2048
 seed=0
 wbits="1,2,3"
+forward_batch_size=4
 
 # Step 1: layer-output gradients
 layer_grads_path="cache/${model_name}/LayerGrads_${dataset}-N${nsamples}-L${seqlen}-Seed${seed}${model_str}.pt"
@@ -46,5 +47,5 @@ python -m gemq.compute_model_stats \
     --wbits "${wbits}" \
     --layer_grads_path "${layer_grads_path}" \
     --layer_re_path "${layer_re_path}" \
-    --forward_batch_size 32 \
+    --forward_batch_size "${forward_batch_size}" \
     --resource_output "${resource_output}"
