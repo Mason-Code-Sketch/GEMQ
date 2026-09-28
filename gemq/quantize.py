@@ -168,6 +168,22 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
         model.save_pretrained(save_path)
 
 
+def validate_checkpoint_paths(args):
+    """Validate the optional fake checkpoint saved before real-weight packing."""
+    if args.eval_real_quant and not args.real_quant:
+        raise ValueError("--eval_real_quant requires --real_quant.")
+
+    if not args.fake_save_path:
+        return
+
+    if not args.real_quant:
+        raise ValueError("--fake_save_path requires --real_quant.")
+    if not args.save_path:
+        raise ValueError("--fake_save_path requires --save_path.")
+    if os.path.abspath(args.fake_save_path) == os.path.abspath(args.save_path):
+        raise ValueError("--fake_save_path must differ from --save_path.")
+
+
 def capture_router_finetune_state(model, router_params):
     """Capture identity-based router and frozen-parameter checks before AdamW."""
     router_ids = {id(param) for param in router_params}
@@ -652,6 +668,10 @@ def parse_args():
         help="Save quantized checkpoint under this path"
     )
     parser.add_argument(
+        "--fake_save_path", type=str, default="",
+        help="Optional fake-quant checkpoint saved before real-weight packing",
+    )
+    parser.add_argument(
         "--save_dtype", type=str, default="float16", choices=["float16", "bfloat16"],
         help="Data type to save the quantized model"
     )
@@ -669,8 +689,7 @@ if __name__ == "__main__":
     print(json.dumps(vars(args), indent=4))
     resource_ledger = ResourceLedger(args.resource_output)
 
-    if args.eval_real_quant and not args.real_quant:
-        raise ValueError("--eval_real_quant requires --real_quant.")
+    validate_checkpoint_paths(args)
 
     with resource_ledger.command():
         with resource_ledger.component("load_model_and_tokenizer"):
@@ -767,6 +786,18 @@ if __name__ == "__main__":
                     args.model_name,
                     offload=True,
                     dataset_root=args.dataset_root,
+                )
+
+        if args.fake_save_path:
+            with resource_ledger.component("checkpoint_fake_quant"):
+                print("Saving fake-quant model ...")
+                os.makedirs(args.fake_save_path, exist_ok=True)
+                save_quantized_model(
+                    model,
+                    tokenizer,
+                    args.fake_save_path,
+                    args.save_dtype,
+                    real_quant=False,
                 )
 
         if args.save_path:
