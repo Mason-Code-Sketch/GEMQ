@@ -1,3 +1,9 @@
+import json
+import os
+from pathlib import Path
+import pickle
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -147,7 +153,6 @@ def test_mapped_layer_re_matches_eager_loading_and_batching(tmp_path, monkeypatc
         monkeypatch.setattr(torch, "load", load_gradients)
         args.forward_batch_size = batch_size
         compute_model_stats.compute_faster_layer_re(model, batches, args)
-        import pickle
         with open(args.layer_re_path, "rb") as file:
             results.append(pickle.load(file))
     for scores in results[1:]:
@@ -157,3 +162,63 @@ def test_mapped_layer_re_matches_eager_loading_and_batching(tmp_path, monkeypatc
                     assert scores[layer_id][expert_id][bitwidth] == pytest.approx(
                         results[0][layer_id][expert_id][bitwidth], rel=1e-5, abs=1e-12
                     )
+
+
+def test_qwen3_scripts_use_dgx_paths_and_protocol(tmp_path):
+    repo = Path(__file__).resolve().parents[1]
+    calls_path = tmp_path / "calls.jsonl"
+    interpreter = tmp_path / "python"
+    interpreter.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['CALLS_PATH'], 'a') as file:\n"
+        "    file.write(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd(), "
+        "'cuda': os.environ.get('CUDA_VISIBLE_DEVICES')}) + '\\n')\n"
+    )
+    interpreter.chmod(0o755)
+    env = dict(os.environ, PYTHON=str(interpreter), CALLS_PATH=str(calls_path))
+    for name in ("compute_stats", "allocate", "quantize"):
+        script = repo / "scripts" / f"{name}_qwen3moe.sh"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        subprocess.run(["bash", str(script)], cwd=tmp_path, env=env, check=True)
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    assert len(calls) == 4
+    assert all(call["cwd"] == str(repo) for call in calls)
+    for call in (calls[0], calls[1], calls[3]):
+        args = call["args"]
+        assert args[args.index("--model") + 1] == "../../models/Qwen3-30B-A3B"
+        assert args[args.index("--dataset_root") + 1] == "../../datasets"
+        assert args[args.index("--nsamples") + 1] == "128"
+        assert args[args.index("--seqlen") + 1] == "2048"
+        assert call["cuda"] == "0"
+    assert calls[1]["args"][calls[1]["args"].index("--forward_batch_size") + 1] == "1"
+    assert "--finetune_routers" in calls[3]["args"]
+    assert calls[3]["args"][calls[3]["args"].index("--calib_dataset") + 1] == "wikitext2"
+
+
+@pytest.mark.cuda
+def test_qwen3_gptq_router_ft_and_perplexity_smoke():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from gemq.quantize import finetune_routers, quantize_weights_gptq
+    from gemq.utils.eval_utils import compute_perplexity
+
+    model = make_model(dtype=torch.float16).eval()
+    model.seqlen = 8
+    batches = make_batches()
+    args = SimpleNamespace(
+        model_name=MODEL_NAME, mixed=False, attn_wbits=4, gate_wbits=16,
+        dense_wbits=4, expert_wbits=2, groupsize=128, blocksize=128,
+        percdamp=0.01, actorder=False, static_groups=False, mse=True,
+        reproduce_mcmoe=False, nsamples=4, verbose=False,
+        rft_lr=1e-4, rft_wd=1e-4, rft_epochs=1, rft_batch_size=1,
+    )
+    quant_modules, packed_states = quantize_weights_gptq(model, batches, args)
+    assert len(quant_modules) == 32
+    assert not packed_states
+    model.cuda()
+    finetune_routers(model, batches, args)
+    model.eval()
+    input_ids = torch.cat([data for data, _ in batches], dim=1)
+    perplexity = compute_perplexity(model, input_ids, "smoke")
+    assert 1.0 < perplexity < float("inf")
