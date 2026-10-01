@@ -5,6 +5,7 @@ import pickle
 import json
 import time
 import gc
+import tempfile
 from collections import defaultdict
 from functools import partial
 from tqdm import tqdm
@@ -232,49 +233,81 @@ def compute_layer_grads(model, dataloader, args):
     """
     Compute outputs gradients wrt to the task loss of all decoder layers.
     """
+    num_batches = len(dataloader)
+    if num_batches == 0:
+        raise ValueError("Layer gradients require at least one calibration batch.")
+    use_cache = model.config.use_cache
     model.config.use_cache = False
 
     disabled_gates = disable_deepseek_aux_loss(model, args.model_name)
     if disabled_gates:
         print(f"Disabled auxiliary loss in {disabled_gates} DeepSeek MoE gates.")
 
-    # register hooks to get activation gradients
-    layer_output_grads = defaultdict(list)
-
-    def get_gradient_hook(m, grad_input, grad_output, grads):
-        # grad_output is a tuple; we're only interested in the first element
-        grads.append(grad_output[0].cpu())  # (bsz, seqlen, hidden_size)
-
     layers = get_blocks(model, args.model_name)
     handles = []
-    for i in range(len(layers)):
-        handle = layers[i].register_full_backward_hook(
-            partial(get_gradient_hook, grads=layer_output_grads[i])
-        )
-        handles.append(handle)
+    parameters = list(model.parameters())
+    requires_grad = [parameter.requires_grad for parameter in parameters]
+    cache_dir = osp.dirname(osp.abspath(args.layer_grads_path))
+    os.makedirs(cache_dir, exist_ok=True)
 
-    # accumulate gradients
-    model.zero_grad()
-    for data in tqdm(dataloader, desc="Computing gradients"):
-        x = data[0].cuda()
-        outputs = model(input_ids=x, labels=x)
-        loss = outputs.loss
-        loss.backward()
+    try:
+        model.zero_grad(set_to_none=True)
+        for parameter in parameters:
+            parameter.requires_grad_(False)
 
-    # remove hooks
-    for handle in handles:
-        handle.remove()
+        # Keep the activation graph without allocating parameter gradients.
+        embedding = model.get_input_embeddings()
+        handles.append(embedding.register_forward_hook(
+            lambda module, inputs, output: output.requires_grad_(True)
+        ))
 
-    # combine results of each layer
-    for i in range(len(layers)):
-        layer_output_grads[i] = torch.stack(layer_output_grads[i], dim=0)  # (num_batches, bsz, seqlen, hidden_size)
-    
-    # save gradients
-    os.makedirs(osp.dirname(args.layer_grads_path), exist_ok=True)
-    print(f"Saving layer output gradients to: {args.layer_grads_path} ... ", end="")
-    start = time.time()
-    torch.save(layer_output_grads, args.layer_grads_path)
-    print(f"Done in {(time.time() - start)/60:.2f} minutes")
+        with tempfile.TemporaryDirectory(prefix=".layer-grads-", dir=cache_dir) as scratch:
+            layer_output_grads = {}
+            counts = [0] * len(layers)
+
+            def get_gradient_hook(module, grad_input, grad_output, layer_id):
+                gradient = grad_output[0].detach()
+                if layer_id not in layer_output_grads:
+                    storage = torch.from_file(
+                        osp.join(scratch, f"layer-{layer_id}.bin"),
+                        shared=True,
+                        size=num_batches * gradient.numel(),
+                        dtype=gradient.dtype,
+                    )
+                    layer_output_grads[layer_id] = storage.view(num_batches, *gradient.shape)
+                buffer = layer_output_grads[layer_id]
+                index = counts[layer_id]
+                if index >= num_batches or buffer.shape[1:] != gradient.shape:
+                    raise ValueError("Layer gradient batches must have matching shapes and counts.")
+                buffer[index].copy_(gradient.cpu())
+                counts[layer_id] += 1
+
+            for i, layer in enumerate(layers):
+                handles.append(layer.register_full_backward_hook(
+                    partial(get_gradient_hook, layer_id=i)
+                ))
+
+            for data in tqdm(dataloader, desc="Computing gradients"):
+                x = data[0].to(embedding.weight.device)
+                outputs = model(input_ids=x, labels=x)
+                outputs.loss.backward()
+
+            if counts != [num_batches] * len(layers):
+                raise RuntimeError(f"Missing layer output gradients: {counts}")
+
+            print(f"Saving layer output gradients to: {args.layer_grads_path} ... ", end="", flush=True)
+            start = time.time()
+            checkpoint = osp.join(scratch, "LayerGrads.pt")
+            torch.save(layer_output_grads, checkpoint)
+            os.replace(checkpoint, args.layer_grads_path)
+            print(f"Done in {(time.time() - start)/60:.2f} minutes")
+    finally:
+        for handle in handles:
+            handle.remove()
+        for parameter, enabled in zip(parameters, requires_grad):
+            parameter.requires_grad_(enabled)
+        model.config.use_cache = use_cache
+
     print("Layer output gradients saved to:", args.layer_grads_path)
 
 
@@ -424,7 +457,9 @@ def compute_faster_layer_re(model, dataloader, args):
     print(f"Loading layer output gradients from: {args.layer_grads_path} ... ", end="", flush=True)
     start = time.time()
     # NOTE: this might take a while for large models like Mixtral-8x7B
-    layer_output_grads = torch.load(args.layer_grads_path, weights_only=False, map_location="cpu")
+    layer_output_grads = torch.load(
+        args.layer_grads_path, weights_only=False, map_location="cpu", mmap=True
+    )
     print(f"Done in {(time.time() - start)/60:.2f} minutes")
     # {0: (nsamples, 1, seqlen, hidden_size), 1: ...}
     assert num_samples == layer_output_grads[0].shape[0], \

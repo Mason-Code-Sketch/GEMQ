@@ -1,16 +1,22 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+python="${PYTHON:-../../third-party/GEMQ/.venv/bin/python}"
+export CUDA_VISIBLE_DEVICES=0
+
 # ===============================
 #  Model settings
 # ===============================
 model_name="Qwen/Qwen3-30B-A3B"
-model="Qwen/Qwen3-30B-A3B"
+model="../../models/Qwen3-30B-A3B"
 
 # ===============================
 #  Dataset settings
 # ===============================
 calib_dataset="wikitext2"
+dataset_root="../../datasets"
 nsamples=128
 seqlen=2048
 
@@ -25,9 +31,7 @@ bit_cfg="configs/${model_name}/GEMQ/C4-Seed0_E${bpe}_B1,2,3_c2c3.pkl"
 # ===============================
 #  Router fine-tuning
 # ===============================
-# NOTE: Router fine-tuning for Mixtral-8x7B requires 3×80GB GPUs.
-# Set this option to false if you do not have sufficient resources.
-finetune_routers=false      # whether to finetune the routers after quantization
+finetune_routers=true       # whether to finetune the routers after quantization
 rft_epochs=1
 rft_lr=1e-4
 
@@ -51,7 +55,7 @@ save_model=true            # whether to save the quantized model
 # ===============================
 model_args=(--model "$model" --model_name "$model_name")
 
-data_args=(--calib_dataset "$calib_dataset" --nsamples "$nsamples" --seqlen "$seqlen")
+data_args=(--calib_dataset "$calib_dataset" --dataset_root "$dataset_root" --nsamples "$nsamples" --seqlen "$seqlen")
 
 # NOTE: `--reproduce_mcmoe` may cause NaNs. Disable it or use BF16 instead.
 bpe_int=$(printf "%.0f" "$bpe")
@@ -109,7 +113,7 @@ echo "----------------------------------------------"
 echo ">>> Running quantization ..."
 echo "=============================================="
 
-python -m gemq.quantize \
+"$python" -m gemq.quantize \
     "${model_args[@]}" \
     "${data_args[@]}" \
     "${quant_args[@]}" \

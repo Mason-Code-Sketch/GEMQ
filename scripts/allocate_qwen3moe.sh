@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+python="${PYTHON:-../../third-party/GEMQ/.venv/bin/python}"
+
 # Settings
 model_name="Qwen/Qwen3-30B-A3B"
 bits_per_expert=2.5  # target average bits-per-expert
@@ -11,7 +15,7 @@ extra_constr="c2c3"  # extra constraints for bit allocation
 # path to the weighted layer reconstruction errors (i.e., ILP coefficients)
 layer_re_path="cache/${model_name}/LayerRE_c4-N128-L2048-Seed0_B1,2,3_faster.pkl"
 
-python -m gemq.allocate_bits \
+"$python" -m gemq.allocate_bits \
     --model_name ${model_name} \
     --layer_re_path ${layer_re_path} \
     --bit_budget ${bits_per_expert} \

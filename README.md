@@ -51,6 +51,27 @@ pip install -e .
 
 > `scripts` provides the full pipeline -- bit allocation, quantization and real quantized inference -- for **Mixtral-8×7B**, **DeepSeek-V2-Lite**, **OLMoE-1B-7B-0924** and **Qwen3-30B-A3B**.
 
+### Qwen3 on DGX Spark
+
+The `dgx` branch uses Transformers 4.57.1 and the independent Qwen3 expert layout.
+The Qwen3 statistics, allocation and quantization scripts run from the repository
+root with `../../third-party/GEMQ/.venv/bin/python` (`PYTHON` can override it).
+They load the model from `../../models/Qwen3-30B-A3B` and datasets from
+`../../datasets`. Quantization enables router fine-tuning; reconstruction scoring
+uses a forward batch size of 1. Calibration remains 128 sequences of 2048 tokens.
+
+LayerGrads freezes model parameters and differentiates through input activations.
+Output gradients are written to temporary file-backed tensors, then saved in the
+original `LayerGrads_*.pt` format. LayerRE memory-maps this checkpoint instead of
+loading every layer's gradients into RAM. Temporary buffers are removed after
+completion or failure. During checkpoint creation, reserve disk space for both
+the temporary buffers and the final gradient checkpoint (about 96 GiB total for
+Qwen3 FP16 with 128 sequences of 2048 tokens).
+
+Run the Qwen3 scripts in order: `compute_stats_qwen3moe.sh`,
+`allocate_qwen3moe.sh`, then `quantize_qwen3moe.sh`. Full-model memory limits still
+need to be checked before a formal run.
+
 
 ### 1. Bit Allocation
 
