@@ -74,20 +74,26 @@ def dispatch_model_to_all_devices(model):
     """
     print("Dispatching model weights to all devices ... ", end="")
     t0 = time.time()
-    device_map = infer_auto_device_map(
-        model,
-        no_split_module_classes=[
-            "LlamaDecoderLayer",
-            "Qwen3DecoderLayer",
-            "MixtralDecoderLayer",
-            "DeepseekV2DecoderLayer",
-            "OlmoeDecoderLayer",
-            "Qwen3MoeDecoderLayer",
-            "Qwen2MoeDecoderLayer",
-        ],
-        max_memory=get_balanced_memory(model),
-    )
-    model = dispatch_model(model, device_map=device_map)
+    if torch.cuda.device_count() == 1 and getattr(
+        torch.cuda.get_device_properties(0), "is_integrated", False
+    ):
+        # CPU-resident weights already consume the integrated GPU's shared RAM.
+        model = model.to("cuda:0")
+    else:
+        device_map = infer_auto_device_map(
+            model,
+            no_split_module_classes=[
+                "LlamaDecoderLayer",
+                "Qwen3DecoderLayer",
+                "MixtralDecoderLayer",
+                "DeepseekV2DecoderLayer",
+                "OlmoeDecoderLayer",
+                "Qwen3MoeDecoderLayer",
+                "Qwen2MoeDecoderLayer",
+            ],
+            max_memory=get_balanced_memory(model),
+        )
+        model = dispatch_model(model, device_map=device_map)
     torch.cuda.synchronize()
     print(f"Done in {(time.time() - t0)/60:.2f} minutes")
     return model
