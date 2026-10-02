@@ -88,6 +88,15 @@ def _pack_qwen_experts(moe_block):
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA for HQQ packing")
 class Qwen15RealQuantTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        block = Qwen2MoeSparseMoeBlock(_make_config())
+        if isinstance(block.experts, torch.nn.ModuleList):
+            raise unittest.SkipTest(
+                "Installed Transformers uses ModuleList Qwen1.5 experts; "
+                "fused HQQ integration tests require the fused-expert implementation."
+            )
+
     def test_hqq_fused_experts_match_fake_quantized_forward(self):
         config = _make_config()
         moe_block = Qwen2MoeSparseMoeBlock(config).to(DEVICE, dtype=torch.float16)

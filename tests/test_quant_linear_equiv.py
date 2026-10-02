@@ -119,12 +119,12 @@ def test_gemlite_linear_matches_fp16_matmul(device, nbits, group_size):
     today (attention and dense layers keep their GemLiteLinearTriton), but the low
     bit-widths are covered to document where the packing is and is not portable.
 
-    3-bit is expected to fail: GemLite does not support it natively, patch.py appends
+    3-bit is skipped: GemLite does not support it natively, patch.py appends
     it to SUPPORTED_BITS_TRITON and swaps in GEMQ's own packer so that *GEMQ's*
     kernels can read the buffer. GemLite's kernels never learned that layout.
     """
     if nbits == 3:
-        pytest.xfail(
+        pytest.skip(
             "3-bit is not natively supported by GemLite; patch.py enables it only for "
             "GEMQ's own kernels. A 3-bit weight left as a plain GemLiteLinearTriton "
             "would silently return garbage -- see test_repo_gemm_kernel_* for the path "
@@ -157,7 +157,7 @@ def test_gemlite_linear_matches_at_batch_one(device, nbits):
     configurations than the batched case, so cover both.
     """
     if nbits == 3:
-        pytest.xfail("see test_gemlite_linear_matches_fp16_matmul: GemLite has no 3-bit support")
+        pytest.skip("GemLite has no native 3-bit support; covered by GEMQ's own kernel tests")
 
     torch.manual_seed(0)
     W = (torch.randn(OUT_FEATURES, IN_FEATURES, device=device) * 0.02).half()

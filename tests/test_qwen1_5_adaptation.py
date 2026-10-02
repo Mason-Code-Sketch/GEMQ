@@ -24,7 +24,7 @@ from gemq.utils.model_utils import (
 )
 
 
-def _make_qwen_moe_block():
+def _make_qwen_moe_block(require_fused=True):
     config = Qwen2MoeConfig(
         hidden_size=16,
         intermediate_size=32,
@@ -36,7 +36,13 @@ def _make_qwen_moe_block():
         num_experts=3,
         num_experts_per_tok=2,
     )
-    return Qwen2MoeSparseMoeBlock(config)
+    block = Qwen2MoeSparseMoeBlock(config)
+    if require_fused and isinstance(block.experts, torch.nn.ModuleList):
+        raise unittest.SkipTest(
+            "Installed Transformers uses ModuleList Qwen1.5 experts; "
+            "this integration test requires the fused-expert implementation."
+        )
+    return block
 
 
 class _FlatFakeQuantizer:
@@ -82,6 +88,13 @@ class _LoadedModel:
 
 
 class Qwen15AdaptationTest(unittest.TestCase):
+    def test_runtime_layout_validation_rejects_module_list_experts(self):
+        block = SimpleNamespace(experts=torch.nn.ModuleList())
+        model = _TinyQwenModel(block)
+
+        with self.assertRaisesRegex(TypeError, "fused MoE block must expose"):
+            validate_qwen2_moe_model(model, "Qwen/Qwen1.5-MoE-A2.7B")
+
     def test_fused_block_has_tensor_output_and_expert_count_on_experts(self):
         block = _make_qwen_moe_block()
         hidden_states = torch.randn(2, 3, 16)
@@ -220,7 +233,7 @@ class Qwen15AdaptationTest(unittest.TestCase):
             )
 
     def test_qwen_router_sanity_uses_parameter_identity(self):
-        block = _make_qwen_moe_block()
+        block = _make_qwen_moe_block(require_fused=False)
         model = _TinyQwenModel(block)
         router_params = get_router_params(model, "Qwen/Qwen1.5-MoE-A2.7B")
         self.assertEqual([id(param) for param in router_params], [id(block.gate.weight)])
@@ -235,7 +248,7 @@ class Qwen15AdaptationTest(unittest.TestCase):
 
         state = capture_router_finetune_state(model, router_params)
         with torch.no_grad():
-            block.experts.gate_up_proj.add_(0.25)
+            next(block.experts.parameters()).add_(0.25)
         with self.assertRaisesRegex(RuntimeError, "Frozen parameters changed"):
             validate_router_finetune_state(model, router_params, state)
 
