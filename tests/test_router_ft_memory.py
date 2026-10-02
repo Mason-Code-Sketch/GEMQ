@@ -9,7 +9,8 @@ import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from gemq import quantize
-from gemq.utils.model_utils import get_router_params
+from gemq.quantizers.rtn import RTNWeightQuantizer
+from gemq.utils.model_utils import get_named_linears, get_router_params
 
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"
@@ -179,6 +180,41 @@ def test_packing_releases_old_modules_only_after_validation(monkeypatch):
     assert quant_modules == {}
     assert packed_states == {}
     assert reference() is None
+
+
+@pytest.mark.cuda
+@torch.no_grad()
+def test_qwen3_packed_forward_survives_old_module_release():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    model = make_model("cuda", torch.float16).eval()
+    args = SimpleNamespace(model_name=MODEL_NAME, mixed=False, expert_wbits=2,
+                           attn_wbits=4, gate_wbits=16, dense_wbits=4)
+    bit_cfg = quantize.build_alloc_cfg(model, args)
+    modules = {}
+    for layer_id, layer in enumerate(model.model.layers):
+        for name, module in get_named_linears(layer).items():
+            bits = bit_cfg[layer_id][name]
+            if bits >= 16:
+                continue
+            quantizer = RTNWeightQuantizer(module.weight.data, nbits=bits, groupsize=128)
+            codes, scales, zeros = quantizer.quantize()
+            weight = quantizer.dequantize(codes, scales, zeros).reshape_as(module.weight)
+            module.weight.copy_(weight)
+            module.register_buffer("quant_scales", scales)
+            module.register_buffer("quant_zeros", zeros)
+            module.register_buffer("quant_nbits", torch.tensor(bits))
+            module.register_buffer("quant_groupsize", torch.tensor(128))
+            modules[f"{layer_id}.{name}"] = module
+    del module, quantizer, weight, codes, scales, zeros
+    references = [weakref.ref(module) for module in modules.values()]
+    data = torch.randint(0, 128, (1, 16), device="cuda")
+    expected = model(input_ids=data).logits
+    quantize.pack_quantized_model(model, modules, {}, args)
+    assert not modules
+    assert all(reference() is None for reference in references)
+    actual = model(input_ids=data).logits
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
 
 def test_failed_packing_keeps_modules_for_diagnosis(monkeypatch):

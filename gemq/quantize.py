@@ -892,6 +892,7 @@ if __name__ == "__main__":
                             dataset_root=args.dataset_root,
                         )
 
+                release_unused_memory()
                 save_quantized_model(
                     model,
                     tokenizer,
