@@ -60,6 +60,16 @@ They load the model from `../../models/Qwen3-30B-A3B` and datasets from
 `../../datasets`. Quantization enables router fine-tuning; reconstruction scoring
 uses a forward batch size of 1. Calibration remains 128 sequences of 2048 tokens.
 
+On a single integrated CUDA device, Qwen3 router fine-tuning uses non-reentrant
+activation checkpoints for the last 32 attention blocks (layers 16-47 in the
+48-layer model). The first attention block is excluded; experts are not
+checkpointed. Eager attention, samples, dtypes and AdamW settings are unchanged.
+The original attention forwards are restored after training or an exception.
+Training gradients and temporary tensors are released before restoring FP16.
+Unused allocator caches are cleared at phase boundaries, not on every step.
+After packing equivalence is checked, references to the old floating-point
+modules are released before packed-model evaluation and checkpoint saving.
+
 LayerGrads freezes model parameters and differentiates through input activations.
 Output gradients are written to temporary file-backed tensors, then saved in the
 original `LayerGrads_*.pt` format. LayerRE memory-maps this checkpoint instead of

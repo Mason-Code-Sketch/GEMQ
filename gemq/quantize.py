@@ -5,10 +5,12 @@ import gc
 import json
 import pickle
 from functools import partial
+from contextlib import contextmanager
 from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer, logging
 from hqq.models.hf.base import AutoHQQHFModel
 
@@ -168,6 +170,46 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
         model.save_pretrained(save_path)
 
 
+def release_unused_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+@contextmanager
+def checkpoint_router_attention(model, model_name, num_layers):
+    """Recompute selected attention blocks only during router fine-tuning."""
+    originals = []
+    try:
+        if num_layers:
+            # The first attention block precedes every trainable router.
+            layers = get_blocks(model, model_name)[1:][-num_layers:]
+            for layer in layers:
+                attention = layer.self_attn
+                originals.append((attention, attention.__dict__.get("forward")))
+                attention.forward = partial(
+                    checkpoint, attention.forward, use_reentrant=False
+                )
+        yield len(originals)
+    finally:
+        for attention, forward in originals:
+            if forward is None:
+                del attention.forward
+            else:
+                attention.forward = forward
+
+
+def pack_quantized_model(model, quant_modules, qwen2_packed_states, args):
+    replace_linears(model, args.model_name, quant_modules, quant_weight=True)
+    if NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE:
+        replace_qwen2_moe_experts(model, qwen2_packed_states)
+    check_packing(model, quant_modules, args)
+    # Keep the floating-point modules until packing equivalence is checked.
+    quant_modules.clear()
+    qwen2_packed_states.clear()
+    release_unused_memory()
+
+
 def validate_checkpoint_paths(args):
     """Validate the optional fake checkpoint saved before real-weight packing."""
     if args.eval_real_quant and not args.real_quant:
@@ -268,37 +310,55 @@ def finetune_routers(model, dataloader, args):
 
     # start fine-tuning
     optimizer = torch.optim.AdamW(router_params, lr=args.rft_lr, weight_decay=args.rft_wd)
-    for epoch in range(args.rft_epochs):
-        loss_sum = 0.
-        start = time.time()
-        for i in range(args.nsamples // args.rft_batch_size):
-            idx = i * args.rft_batch_size
-            data = input_ids[idx: idx + args.rft_batch_size].to("cuda")  # (bsz, seqlen)
-            outputs = model(input_ids=data, labels=data)
-            loss = outputs.loss
+    checkpoint_layers = 0
+    if (
+        NAME_TO_MODEL[args.model_name] == ModelType.QWEN3MOE
+        and torch.cuda.device_count() == 1
+        and getattr(torch.cuda.get_device_properties(0), "is_integrated", False)
+    ):
+        checkpoint_layers = 32
+    data = outputs = loss = None
+    try:
+        with checkpoint_router_attention(model, args.model_name, checkpoint_layers) as count:
+            if count:
+                print(f"Router FT attention checkpoints: {count}")
+            for epoch in range(args.rft_epochs):
+                loss_sum = 0.
+                start = time.time()
+                for i in range(args.nsamples // args.rft_batch_size):
+                    idx = i * args.rft_batch_size
+                    data = input_ids[idx: idx + args.rft_batch_size].to("cuda")  # (bsz, seqlen)
+                    optimizer.zero_grad(set_to_none=True)
+                    outputs = model(input_ids=data, labels=data)
+                    loss = outputs.loss
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                    loss.backward()
+                    optimizer.step()
 
-            loss_sum += loss.item()
-            if i % 32 == 0:
-                print(f"[epoch {epoch} | iter {i:>3d}] loss: {loss_sum / (i+1):.6f}")
-        elapse = time.time() - start
-        print(f"epoch {epoch:>2} loss: {loss_sum / len(dataloader):.6f}, elapse: {elapse:.2f} seconds")
+                    loss_sum += loss.item()
+                    if i % 32 == 0:
+                        print(f"[epoch {epoch} | iter {i:>3d}] loss: {loss_sum / (i+1):.6f}")
+                    data = outputs = loss = None
+                elapse = time.time() - start
+                print(f"epoch {epoch:>2} loss: {loss_sum / len(dataloader):.6f}, elapse: {elapse:.2f} seconds")
 
-        # sanity check
-        if epoch == 0:
-            max_router_update = validate_router_finetune_state(
-                model, router_params, sanity_state
-            )
-            print("Sanity check passed!")
-            if args.verbose:
-                print("Max router parameter update:", max_router_update)
+                # sanity check
+                if epoch == 0:
+                    max_router_update = validate_router_finetune_state(
+                        model, router_params, sanity_state
+                    )
+                    print("Sanity check passed!")
+                    if args.verbose:
+                        print("Max router parameter update:", max_router_update)
+    finally:
+        model.config.use_cache = use_cache
+        model.zero_grad(set_to_none=True)
+        del data, outputs, loss, input_ids, optimizer, sanity_state, router_params
+        release_unused_memory()
 
     # restore
     model = model.to(org_dtype)
-    model.config.use_cache = use_cache
+    release_unused_memory()
 
 
 @torch.no_grad()
@@ -728,6 +788,7 @@ if __name__ == "__main__":
                 quant_modules, qwen2_packed_states = quantize_weights_gptq(
                     model, dataloader, args
                 )
+            release_unused_memory()
 
         if args.finetune_routers:
             with resource_ledger.component("prepare_router_ft"):
@@ -744,6 +805,7 @@ if __name__ == "__main__":
                     dataset_root=args.dataset_root,
                 )
 
+            release_unused_memory()
             with resource_ledger.component("ft_routers"):
                 print("Fine-tuning routers ...")
                 finetune_routers(model, dataloader, args)
@@ -788,6 +850,7 @@ if __name__ == "__main__":
                     dataset_root=args.dataset_root,
                 )
 
+        release_unused_memory()
         if args.fake_save_path:
             with resource_ledger.component("checkpoint_fake_quant"):
                 print("Saving fake-quant model ...")
@@ -799,6 +862,7 @@ if __name__ == "__main__":
                     args.save_dtype,
                     real_quant=False,
                 )
+            release_unused_memory()
 
         if args.save_path:
             with resource_ledger.component("checkpoint_router_ft"):
@@ -806,15 +870,9 @@ if __name__ == "__main__":
                 os.makedirs(args.save_path, exist_ok=True)
 
                 if args.real_quant:
-                    replace_linears(
-                        model,
-                        args.model_name,
-                        quant_modules,
-                        quant_weight=True,
+                    pack_quantized_model(
+                        model, quant_modules, qwen2_packed_states, args
                     )
-                    if NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE:
-                        replace_qwen2_moe_experts(model, qwen2_packed_states)
-                    check_packing(model, quant_modules, args)
                 else:
                     for name, module in quant_modules.items():
                         module.quant_scales = None
