@@ -326,6 +326,29 @@ def compute_layer_grads(model, dataloader, args):
 
 
 @torch.inference_mode()
+def compute_moe_reconstruction_error(
+    moe_block, block_inps, block_outs, layer_sq_grads, forward_batch_size
+):
+    if forward_batch_size <= 0:
+        raise ValueError("forward_batch_size must be positive")
+
+    sample_losses = []
+    for start in range(0, block_inps.shape[0], forward_batch_size):
+        end = start + forward_batch_size
+        batch_inps = block_inps[start:end]
+        quant_block_outs = get_decoder_hidden_states(
+            moe_block(batch_inps), batch_inps.shape
+        )
+        errors = (
+            layer_sq_grads[start:end]
+            * (block_outs[start:end].double() - quant_block_outs.double()).pow(2)
+        )
+        sample_losses.append(errors.flatten(1).sum(dim=1))
+
+    # Read once per candidate, preserving the original sample-wise summation.
+    return sum(torch.cat(sample_losses).tolist())
+
+
 def compute_qwen2_moe_layer_reconstruction_errors(
     moe_block,
     block_inps,
@@ -370,15 +393,9 @@ def compute_qwen2_moe_layer_reconstruction_errors(
                 moe_block.experts.gate_up_proj[expert_id].copy_(quantized_gate_up)
                 moe_block.experts.down_proj[expert_id].copy_(quantized_down)
 
-            loss = 0.0
-            for start in range(0, block_inps.shape[0], forward_batch_size):
-                end = start + forward_batch_size
-                quant_block_outs = moe_block(block_inps[start:end])
-                loss += (
-                    layer_sq_grads[start:end]
-                    * (block_outs[start:end].double() - quant_block_outs.double()).pow(2)
-                ).sum().item()
-            layer_quant_loss[expert_id][bitwidth] = loss
+            layer_quant_loss[expert_id][bitwidth] = compute_moe_reconstruction_error(
+                moe_block, block_inps, block_outs, layer_sq_grads, forward_batch_size
+            )
 
             if expert_id == num_routed_experts:
                 for module, original_weight in zip(modules, original_weights):
@@ -485,6 +502,8 @@ def compute_faster_layer_re(model, dataloader, args):
     model_type = NAME_TO_MODEL[model_name]
     sublinear_names = get_sublinear_names(model_name)  # e.g., ["gate_proj", "up_proj", "down_proj"]
     fwd_bsz = args.forward_batch_size
+    if fwd_bsz <= 0:
+        raise ValueError("forward_batch_size must be positive")
 
     # retrieve decoder blocks
     layers = get_blocks(model, model_name)
@@ -508,8 +527,8 @@ def compute_faster_layer_re(model, dataloader, args):
             raise ValueError  # early exit to break later inference
 
     layers[0] = Catcher(layers[0])
-    for i in range(num_samples // fwd_bsz):
-        batch = enc[i * fwd_bsz:(i + 1) * fwd_bsz, 0].to("cuda")  # (bsz, seqlen)
+    for start in range(0, num_samples, fwd_bsz):
+        batch = enc[start:start + fwd_bsz, 0].to("cuda")  # (bsz, seqlen)
         try:
             model(batch)
         except ValueError:
@@ -533,9 +552,9 @@ def compute_faster_layer_re(model, dataloader, args):
         # NOTE: we skip computing stats for the first dense layer of deepseekv2
         if model_type == ModelType.DEEPSEEKV2 and i == 0:
             # still need to forward it to get inputs for the next layer
-            for j in range(num_samples // fwd_bsz):
-                batch_inps = inps[j * fwd_bsz:(j + 1) * fwd_bsz]
-                outs[j * fwd_bsz:(j + 1) * fwd_bsz] = get_decoder_hidden_states(
+            for start in range(0, num_samples, fwd_bsz):
+                batch_inps = inps[start:start + fwd_bsz]
+                outs[start:start + fwd_bsz] = get_decoder_hidden_states(
                     layer(batch_inps, **layer_kwargs), batch_inps.shape
                 )
             layers[i] = layer.to("cpu")
@@ -551,9 +570,9 @@ def compute_faster_layer_re(model, dataloader, args):
         # get unquantized layer outputs and moe block in/outs
         block_inps, block_outs = [], []
         handle = moe_block.register_forward_hook(partial(get_inout_hook, inps=block_inps, outs=block_outs))
-        for j in range(num_samples // fwd_bsz):
-            batch_inps = inps[j * fwd_bsz:(j + 1) * fwd_bsz]
-            outs[j * fwd_bsz:(j + 1) * fwd_bsz] = get_decoder_hidden_states(
+        for start in range(0, num_samples, fwd_bsz):
+            batch_inps = inps[start:start + fwd_bsz]
+            outs[start:start + fwd_bsz] = get_decoder_hidden_states(
                 layer(batch_inps, **layer_kwargs), batch_inps.shape
             )
         block_inps = torch.cat(block_inps, dim=0)  # (num_samples, seqlen, hidden_size)
@@ -609,15 +628,9 @@ def compute_faster_layer_re(model, dataloader, args):
                     m.weight.data = quantizers[e][b][l].quantize()
 
                 # compute output changes (weighted sum squared errors)
-                loss = 0
-                for j in range(num_samples // fwd_bsz):
-                    weights = layer_sq_grads[j * fwd_bsz:(j + 1) * fwd_bsz]
-                    quant_block_outs = moe_block(block_inps[j * fwd_bsz:(j + 1) * fwd_bsz])  # (bsz, seqlen, hidden_size)
-                    # NOTE: for model that outputs a tuple
-                    if isinstance(quant_block_outs, (list, tuple)):
-                        quant_block_outs = quant_block_outs[0]
-                    loss += (weights * (block_outs[j * fwd_bsz:(j + 1) * fwd_bsz].double() - quant_block_outs.double()).pow(2)).sum().item()
-                layer_quant_loss[e][b] = loss
+                layer_quant_loss[e][b] = compute_moe_reconstruction_error(
+                    moe_block, block_inps, block_outs, layer_sq_grads, fwd_bsz
+                )
 
                 # restore unquantized weights
                 if "shared" in expert_name:

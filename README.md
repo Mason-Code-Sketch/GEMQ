@@ -84,6 +84,12 @@ On a single integrated CUDA device, Qwen3 LayerGrads also checkpoints the last
 Experts, eager attention, FP16, calibration samples and output-gradient format
 are unchanged. Attention forwards are restored on success and failure.
 
+LayerRE supports `--forward_batch_size` for batched candidate evaluation, including
+the final partial batch. Its FP64 weighted reconstruction error is reduced per
+sample and read back once per candidate. Validate scores and peak memory before
+increasing this batch size on a new device; batched FP16 forwards can differ
+slightly from single-sample forwards.
+
 Run the Qwen3 scripts in order: `compute_stats_qwen3moe.sh`,
 `allocate_qwen3moe.sh`, then `quantize_qwen3moe.sh`. Full-model memory limits still
 need to be checked before a formal run.
