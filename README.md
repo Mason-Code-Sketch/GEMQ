@@ -90,6 +90,13 @@ sample and read back once per candidate. Validate scores and peak memory before
 increasing this batch size on a new device; batched FP16 forwards can differ
 slightly from single-sample forwards.
 
+Qwen3 LayerRE caches routing and unchanged expert contributions. Each candidate
+recomputes only its expert, replaying contributions in native expert-ID order
+with the original dtype and per-sample FP64 reduction. Every layer checks that
+the cached baseline output exactly matches the native output; a mismatch uses
+full MoE forwards for that layer. The cache increases activation memory, so
+validate memory and candidate scores with the chosen batch size before running.
+
 Run the Qwen3 scripts in order: `compute_stats_qwen3moe.sh`,
 `allocate_qwen3moe.sh`, then `quantize_qwen3moe.sh`. Full-model memory limits still
 need to be checked before a formal run.

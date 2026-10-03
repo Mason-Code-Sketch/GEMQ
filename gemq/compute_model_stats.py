@@ -24,6 +24,7 @@ from gemq.utils.hf_loading import (
 )
 from gemq.resource_ledger import ResourceLedger
 from gemq.utils.activation_checkpoint import checkpoint_attention
+from gemq.utils.moe_reconstruction import Qwen3MoeReconstructionCache
 
 logging.set_verbosity_error()
 
@@ -612,6 +613,14 @@ def compute_faster_layer_re(model, dataloader, args):
 
         # compute reconstruction errors of block output caused by quantization (perturbation)
         layer_sq_grads = layer_output_grads[i].squeeze(1).double().pow(2).to("cuda")  # (nsamples, seqlen, hidden_size)
+        reconstruction_cache = None
+        if model_type == ModelType.QWEN3MOE:
+            reconstruction_cache = Qwen3MoeReconstructionCache(
+                moe_block, block_inps, block_outs, layer_sq_grads, fwd_bsz
+            )
+            if not reconstruction_cache.is_exact:
+                print(f"Layer {i}: cached MoE output differs; using full forwards", flush=True)
+                reconstruction_cache = None
         layer_quant_loss = defaultdict(dict)
         for e, expert_name in enumerate(expert_names):
             # cache unquantized weights
@@ -628,9 +637,12 @@ def compute_faster_layer_re(model, dataloader, args):
                     m.weight.data = quantizers[e][b][l].quantize()
 
                 # compute output changes (weighted sum squared errors)
-                layer_quant_loss[e][b] = compute_moe_reconstruction_error(
-                    moe_block, block_inps, block_outs, layer_sq_grads, fwd_bsz
-                )
+                if reconstruction_cache is not None:
+                    layer_quant_loss[e][b] = reconstruction_cache.score(e)
+                else:
+                    layer_quant_loss[e][b] = compute_moe_reconstruction_error(
+                        moe_block, block_inps, block_outs, layer_sq_grads, fwd_bsz
+                    )
 
                 # restore unquantized weights
                 if "shared" in expert_name:
@@ -640,6 +652,7 @@ def compute_faster_layer_re(model, dataloader, args):
 
         # store layer results
         quant_loss[i] = layer_quant_loss
+        del reconstruction_cache
 
         # update buffers
         inps, outs = outs, inps
