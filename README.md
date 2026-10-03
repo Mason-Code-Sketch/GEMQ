@@ -78,6 +78,12 @@ completion or failure. During checkpoint creation, reserve disk space for both
 the temporary buffers and the final gradient checkpoint (about 96 GiB total for
 Qwen3 FP16 with 128 sequences of 2048 tokens).
 
+On a single integrated CUDA device, Qwen3 LayerGrads also checkpoints the last
+32 attention blocks. `--attention_checkpoint_layers` overrides this count
+(`0` disables it; `48` covers all Qwen3 attention blocks, including the first).
+Experts, eager attention, FP16, calibration samples and output-gradient format
+are unchanged. Attention forwards are restored on success and failure.
+
 Run the Qwen3 scripts in order: `compute_stats_qwen3moe.sh`,
 `allocate_qwen3moe.sh`, then `quantize_qwen3moe.sh`. Full-model memory limits still
 need to be checked before a formal run.

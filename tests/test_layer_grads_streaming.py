@@ -58,12 +58,13 @@ def reference_gradients(model, batches):
     return {i: torch.stack(values) for i, values in gradients.items()}
 
 
+@pytest.mark.parametrize("checkpoint_layers", [0, 32])
 @pytest.mark.parametrize("device,dtype", [
     ("cpu", torch.float32),
     pytest.param("cuda", torch.float32, marks=pytest.mark.cuda),
     pytest.param("cuda", torch.float16, marks=pytest.mark.cuda),
 ])
-def test_streamed_gradients_match_full_parameter_backward(tmp_path, monkeypatch, device, dtype):
+def test_streamed_gradients_match_full_parameter_backward(tmp_path, monkeypatch, device, dtype, checkpoint_layers):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     model = make_model(device, dtype)
@@ -83,7 +84,10 @@ def test_streamed_gradients_match_full_parameter_backward(tmp_path, monkeypatch,
 
     monkeypatch.setattr(torch, "save", check_file_backed_buffers)
     compute_model_stats.compute_layer_grads(
-        model, batches, SimpleNamespace(model_name=MODEL_NAME, layer_grads_path=str(path))
+        model, batches, SimpleNamespace(
+            model_name=MODEL_NAME, layer_grads_path=str(path),
+            attention_checkpoint_layers=checkpoint_layers,
+        )
     )
     actual = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     for i in expected:
@@ -93,6 +97,7 @@ def test_streamed_gradients_match_full_parameter_backward(tmp_path, monkeypatch,
     assert list(tmp_path.iterdir()) == [path]
     assert not model.get_input_embeddings()._forward_hooks
     assert all(not layer._backward_hooks for layer in model.model.layers)
+    assert all("forward" not in layer.self_attn.__dict__ for layer in model.model.layers)
 
 
 def test_failed_backward_preserves_cache_and_restores_model(tmp_path, monkeypatch):
@@ -113,7 +118,9 @@ def test_failed_backward_preserves_cache_and_restores_model(tmp_path, monkeypatc
     path.write_bytes(b"previous cache")
     with pytest.raises(RuntimeError, match="test failure"):
         compute_model_stats.compute_layer_grads(
-            model, make_batches(), SimpleNamespace(model_name=MODEL_NAME, layer_grads_path=str(path))
+            model, make_batches(), SimpleNamespace(
+                model_name=MODEL_NAME, layer_grads_path=str(path), attention_checkpoint_layers=32,
+            )
         )
     assert path.read_bytes() == b"previous cache"
     assert list(tmp_path.iterdir()) == [path]
@@ -121,6 +128,23 @@ def test_failed_backward_preserves_cache_and_restores_model(tmp_path, monkeypatc
     assert model.config.use_cache is True
     assert not model.get_input_embeddings()._forward_hooks
     assert all(not layer._backward_hooks for layer in model.model.layers)
+    assert all("forward" not in layer.self_attn.__dict__ for layer in model.model.layers)
+
+
+def test_attention_checkpoint_covers_first_layer_and_restores_after_failure():
+    from gemq.utils.activation_checkpoint import checkpoint_attention
+
+    model = make_model()
+    layers = model.model.layers
+    with pytest.raises(RuntimeError, match="test failure"):
+        with checkpoint_attention(layers, 48) as count:
+            assert count == len(layers)
+            assert all("forward" in layer.self_attn.__dict__ for layer in layers)
+            raise RuntimeError("test failure")
+    assert all("forward" not in layer.self_attn.__dict__ for layer in layers)
+    with pytest.raises(ValueError, match="nonnegative"):
+        with checkpoint_attention(layers, -1):
+            pass
 
 
 @pytest.mark.cuda

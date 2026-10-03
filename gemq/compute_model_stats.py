@@ -23,6 +23,7 @@ from gemq.utils.hf_loading import (
     ensure_deepseek_v2_remote_code_compat,
 )
 from gemq.resource_ledger import ResourceLedger
+from gemq.utils.activation_checkpoint import checkpoint_attention
 
 logging.set_verbosity_error()
 
@@ -247,6 +248,15 @@ def compute_layer_grads(model, dataloader, args):
     handles = []
     parameters = list(model.parameters())
     requires_grad = [parameter.requires_grad for parameter in parameters]
+    checkpoint_layers = getattr(args, "attention_checkpoint_layers", None)
+    if checkpoint_layers is None:
+        checkpoint_layers = 0
+        if (
+            NAME_TO_MODEL[args.model_name] == ModelType.QWEN3MOE
+            and torch.cuda.device_count() == 1
+            and getattr(torch.cuda.get_device_properties(0), "is_integrated", False)
+        ):
+            checkpoint_layers = 32
     cache_dir = osp.dirname(osp.abspath(args.layer_grads_path))
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -287,10 +297,14 @@ def compute_layer_grads(model, dataloader, args):
                     partial(get_gradient_hook, layer_id=i)
                 ))
 
-            for data in tqdm(dataloader, desc="Computing gradients"):
-                x = data[0].to(embedding.weight.device)
-                outputs = model(input_ids=x, labels=x)
-                outputs.loss.backward()
+            with checkpoint_attention(layers, checkpoint_layers) as count:
+                if count:
+                    print(f"LayerGrads attention checkpoints: {count}", flush=True)
+                for data in tqdm(dataloader, desc="Computing gradients"):
+                    x = data[0].to(embedding.weight.device)
+                    outputs = model(input_ids=x, labels=x)
+                    outputs.loss.backward()
+                    del outputs, x
 
             if counts != [num_batches] * len(layers):
                 raise RuntimeError(f"Missing layer output gradients: {counts}")
@@ -691,6 +705,10 @@ def parse_args():
     parser.add_argument(
         "--forward_batch_size", type=int, default=1,
         help="Batch size for model forward pass (used in computing layer reconstruction errors)"
+    )
+    parser.add_argument(
+        "--attention_checkpoint_layers", type=int, default=None,
+        help="LayerGrads attention checkpoints; default is 32 for single-device integrated Qwen3, otherwise 0",
     )
 
     # quantization args

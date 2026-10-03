@@ -10,7 +10,6 @@ from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer, logging
 from hqq.models.hf.base import AutoHQQHFModel
 
@@ -29,6 +28,7 @@ from gemq.inference.qwen2_moe import (
     replace_qwen2_moe_experts,
 )
 from gemq.resource_ledger import ResourceLedger
+from gemq.utils.activation_checkpoint import checkpoint_attention
 
 logging.set_verbosity_error()
 
@@ -179,24 +179,10 @@ def release_unused_memory():
 @contextmanager
 def checkpoint_router_attention(model, model_name, num_layers):
     """Recompute selected attention blocks only during router fine-tuning."""
-    originals = []
-    try:
-        if num_layers:
-            # The first attention block precedes every trainable router.
-            layers = get_blocks(model, model_name)[1:][-num_layers:]
-            for layer in layers:
-                attention = layer.self_attn
-                originals.append((attention, attention.__dict__.get("forward")))
-                attention.forward = partial(
-                    checkpoint, attention.forward, use_reentrant=False
-                )
-        yield len(originals)
-    finally:
-        for attention, forward in originals:
-            if forward is None:
-                del attention.forward
-            else:
-                attention.forward = forward
+    # The first attention block precedes every trainable router.
+    layers = get_blocks(model, model_name)[1:] if num_layers else []
+    with checkpoint_attention(layers, num_layers) as count:
+        yield count
 
 
 def pack_quantized_model(model, quant_modules, qwen2_packed_states, args):
