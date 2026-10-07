@@ -43,17 +43,24 @@ def test_default_output_is_inside_checkpoint(checkpoint):
     args = entry.parse_args(["--model_path", str(checkpoint)])
     assert tuple(args.tasks) == eval_utils.ZEROSHOT_TASKS
     assert args.batch_size == 1
+    assert args.max_batch_size == 8
     assert args.trust_remote_code
     assert entry.result_path(args) == checkpoint / "zeroshot.json"
 
 
 @pytest.mark.parametrize("extra", [
-    ["--batch_size", "0"], ["--limit", "0"], ["--max_length", "0"],
+    ["--batch_size", "0"], ["--max_batch_size", "0"], ["--limit", "0"], ["--max_length", "0"],
     ["--tasks", "piqa", "piqa"], ["--limit", "4", "--output", "x.json"],
 ])
 def test_invalid_cli_is_rejected(checkpoint, extra):
     with pytest.raises(SystemExit):
         entry.parse_args(["--model_path", str(checkpoint), *extra])
+
+
+def test_auto_batch_size(checkpoint):
+    args = entry.parse_args(["--model_path", str(checkpoint), "--batch_size", "auto", "--max_batch_size", "4"])
+    assert args.batch_size == "auto"
+    assert args.max_batch_size == 4
 
 
 @pytest.mark.parametrize("name", ["zeroshot.json", "zeroshot.log", "config.json"])
@@ -103,10 +110,11 @@ def test_invalid_accuracy_fails(value):
 def test_harness_receives_batch_limit_seeds_and_zero_shot(monkeypatch):
     evaluate, wrapper = mock_harness(monkeypatch, results())
     output = eval_utils.run_lm_eval(
-        "model", "tokenizer", tasks=eval_utils.ZEROSHOT_TASKS, batch_size=2, limit=4, seed=3,
+        "model", "tokenizer", tasks=eval_utils.ZEROSHOT_TASKS, batch_size="auto", max_batch_size=4, limit=4, seed=3,
     )
     assert wrapper.call_args.kwargs["pretrained"] == "model"
-    assert wrapper.call_args.kwargs["batch_size"] == 2
+    assert wrapper.call_args.kwargs["batch_size"] == "auto"
+    assert wrapper.call_args.kwargs["max_batch_size"] == 4
     options = evaluate.call_args.kwargs
     assert options["num_fewshot"] == 0
     assert options["limit"] == 4

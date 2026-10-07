@@ -43,6 +43,10 @@ def positive_int(value):
     return number
 
 
+def batch_size(value):
+    return value if value == "auto" else positive_int(value)
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model_path", type=Path, required=True)
@@ -51,7 +55,8 @@ def parse_args(argv=None):
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
-    parser.add_argument("--batch_size", type=positive_int, default=1)
+    parser.add_argument("--batch_size", type=batch_size, default=1)
+    parser.add_argument("--max_batch_size", type=positive_int, default=8)
     parser.add_argument("--max_length", type=positive_int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include_gsm8k", action="store_true")
@@ -130,6 +135,7 @@ def main(argv=None):
                 model, tokenizer, tasks=args.tasks, batch_size=args.batch_size,
                 num_fewshot=0, limit=args.limit, seed=args.seed,
                 max_length=args.max_length, include_gsm8k=args.include_gsm8k,
+                max_batch_size=args.max_batch_size,
             )
             elapsed = perf_counter() - start
             print(f"Evaluation complete in {elapsed:.2f} seconds", flush=True)
@@ -142,6 +148,7 @@ def main(argv=None):
                 "tasks": args.tasks, "include_gsm8k": args.include_gsm8k,
                 "num_fewshot": 0, "apply_chat_template": False,
                 "batch_size": args.batch_size, "max_length": args.max_length,
+                "max_batch_size": args.max_batch_size,
                 "seed": args.seed, "wall_seconds": elapsed,
                 "versions": {name: version(name) for name in ("lm_eval", "torch", "transformers", "datasets", "hqq")},
             }

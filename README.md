@@ -143,7 +143,7 @@ Evaluate a saved real-quant checkpoint, including its fine-tuned Router, without
 running quantization or Router training again:
 
 ```bash
-python -m gemq.eval_zeroshot --model_path "$CHECKPOINT_DIR" --batch_size 1
+python -m gemq.eval_zeroshot --model_path "$CHECKPOINT_DIR" --batch_size auto --max_batch_size 8
 ```
 
 The default suite is PIQA, ARC-Easy, ARC-Challenge, HellaSwag, WinoGrande, MathQA,
