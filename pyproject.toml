@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+eval = ["lm-eval[hf]==0.4.13"]
 # Optional alternative ILP backend. The default is HiGHS, which ships with SciPy,
 # so no license is needed; Gurobi is what the committed configs/ were solved with.
 gurobi = ["gurobipy>=12.0.3"]
