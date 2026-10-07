@@ -131,6 +131,45 @@ The evaluation code runs automatically after quantization. If you want to evalua
 
 Quantized models will be saved under `results`.
 
+### Evaluate an Existing Checkpoint
+
+Install the optional evaluation dependencies in the model's existing environment:
+
+```bash
+pip install -e ".[eval]"
+```
+
+Evaluate a saved real-quant checkpoint, including its fine-tuned Router, without
+running quantization or Router training again:
+
+```bash
+python -m gemq.eval_zeroshot --model_path "$CHECKPOINT_DIR" --batch_size 1
+```
+
+The default suite is PIQA, ARC-Easy, ARC-Challenge, HellaSwag, WinoGrande, MathQA,
+and MMLU. It uses LM Evaluation Harness 0.4.13, zero shots, the native task prompts,
+and no chat template. Scores use `acc_norm` when available, otherwise `acc`.
+MMLU counts once in the equally weighted seven-task average. `--include_gsm8k`
+adds separate strict/flexible exact-match scores without changing that average.
+
+Results and logs default to `zeroshot.json` and `zeroshot.log` inside the model
+directory, beside `qmodel.pt`. `--output` selects a different new JSON path;
+neither existing results nor logs are overwritten. The JSON includes task scores,
+the full harness result, settings, and package versions. Use `--is_fp` for a
+floating-point HF model directory. Keep the checkpoint's model implementation
+and Transformers version when selecting the evaluation environment.
+
+For a terminal-only check, use `--limit` and omit `--output`:
+
+```bash
+python -m gemq.eval_zeroshot --model_path "$CHECKPOINT_DIR" \
+  --tasks piqa --limit 4 --batch_size 1
+```
+
+This evaluates four examples per selected leaf task and creates no result JSON
+or log. For MMLU, the limit applies separately to each subject. Formal evaluation
+omits `--limit`; a partial task suite does not produce a seven-task average.
+
 
 ### 3. Inference
 

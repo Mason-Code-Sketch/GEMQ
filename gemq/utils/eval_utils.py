@@ -1,4 +1,6 @@
 import gc
+import math
+from importlib.metadata import version
 from tqdm import tqdm
 
 import torch
@@ -170,47 +172,67 @@ def evaluate_perplexity(
 
 
 
-def run_lm_eval(model, tokenizer, tasks=["mmlu"], batch_size=32, num_fewshot=0):
-    try:
-        from lm_eval import evaluator, utils
-        from lm_eval.models.huggingface import HFLM
-    except:
-        print("lm_eval package not found. Skipping downstream evaluation ...")
-        return
+ZEROSHOT_TASKS = (
+    "piqa", "arc_easy", "arc_challenge", "hellaswag", "winogrande", "mathqa", "mmlu",
+)
+LM_EVAL_VERSION = "0.4.13"
 
 
-    # wrap the model with lm_eval's HFLM
-    lm_eval_model = HFLM(
-        pretrained=model,
-        tokenizer=tokenizer,
-        batch_size="auto",
-    )
-
-    results = evaluator.simple_evaluate(
-        model=lm_eval_model,
-        tasks=tasks,
-        num_fewshot=num_fewshot,
-        batch_size=batch_size,
-        log_samples=False
-    )
-
-    outputs = []
-    acc_sum = 0.0
+def summarize_lm_eval(results, tasks, include_gsm8k=False):
+    scores = {}
     for task in tasks:
-        if "acc_norm,none" in results["results"][task]:
-            acc = results["results"][task]["acc_norm,none"]
-            acc_sum += acc
-            header = f"{task} (acc_norm)"
+        metrics = results.get("results", {}).get(task, {})
+        if task == "mmlu" and "acc,none" not in metrics:
+            metrics = results.get("groups", {}).get(task, {})
+        metric = next((key for key in ("acc_norm,none", "acc,none") if key in metrics), None)
+        if metric is None:
+            raise ValueError(f"Missing accuracy for task {task}")
+        value = float(metrics[metric])
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(f"Invalid accuracy for task {task}: {value}")
+        scores[task] = {"metric": metric, "value": value}
+    summary = {"tasks": scores}
+    if set(tasks) == set(ZEROSHOT_TASKS):
+        summary["seven_task_average"] = sum(item["value"] for item in scores.values()) / len(ZEROSHOT_TASKS)
+    if include_gsm8k:
+        metrics = results.get("results", {}).get("gsm8k", {})
+        exact_match = {key: float(value) for key, value in metrics.items() if key.startswith("exact_match,")}
+        if not exact_match or any(not math.isfinite(value) or not 0 <= value <= 1 for value in exact_match.values()):
+            raise ValueError("Missing or invalid GSM8K exact-match metrics")
+        summary["gsm8k"] = exact_match
+    return summary
 
-        elif "acc,none" in results["results"][task]:
-            acc = results["results"][task]["acc,none"]
-            acc_sum += acc
-            header = f"{task} (acc)"
 
-        else:
-            raise ValueError(f"Unknown metric for task {task}")
-        
-        output_str = f"{header:<25}: {acc*100:.2f} (%)"
-        outputs.append(output_str)
-    print("\n".join(outputs))
-    print(f"Avg: {acc_sum/len(tasks)*100:.2f} (%)")
+def run_lm_eval(
+    model, tokenizer, tasks=None, batch_size=1, num_fewshot=0,
+    limit=None, seed=0, max_length=None, include_gsm8k=False,
+):
+    from lm_eval import evaluator
+    from lm_eval.models.huggingface import HFLM
+
+    if version("lm_eval") != LM_EVAL_VERSION:
+        raise RuntimeError(f"Install lm-eval[hf]=={LM_EVAL_VERSION} for this evaluation")
+    tasks = list(tasks if tasks is not None else ("mmlu",))
+    if not tasks or len(set(tasks)) != len(tasks):
+        raise ValueError("Tasks must be nonempty and unique")
+    requested = tasks + (["gsm8k"] if include_gsm8k else [])
+    wrapped = HFLM(
+        pretrained=model, tokenizer=tokenizer, backend="causal",
+        batch_size=batch_size, max_length=max_length,
+    )
+    results = evaluator.simple_evaluate(
+        model=wrapped, tasks=requested, num_fewshot=num_fewshot,
+        limit=limit, log_samples=False, apply_chat_template=False,
+        random_seed=seed, numpy_random_seed=seed, torch_random_seed=seed,
+        fewshot_random_seed=seed,
+    )
+    if results is None:
+        raise RuntimeError("Downstream evaluation returned no results")
+    summary = summarize_lm_eval(results, tasks, include_gsm8k)
+    for task, score in summary["tasks"].items():
+        print(f"{task:<25}: {score['value'] * 100:.2f} (%) [{score['metric']}]")
+    if "seven_task_average" in summary:
+        print(f"Avg (7 tasks): {summary['seven_task_average'] * 100:.2f} (%)")
+    for metric, value in summary.get("gsm8k", {}).items():
+        print(f"gsm8k {metric}: {value * 100:.2f} (%)")
+    return {"summary": summary, "harness": results}
