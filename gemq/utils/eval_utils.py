@@ -191,6 +191,7 @@ def summarize_lm_eval(results, tasks, include_gsm8k=False):
 def run_lm_eval(
     model, tokenizer, tasks=None, batch_size=1, num_fewshot=0,
     limit=None, seed=0, max_length=None, include_gsm8k=False,
+    max_batch_size=8,
 ):
     from lm_eval import evaluator
     from lm_eval.models.huggingface import HFLM
@@ -203,7 +204,7 @@ def run_lm_eval(
     requested = tasks + (["gsm8k"] if include_gsm8k else [])
     wrapped = HFLM(
         pretrained=model, tokenizer=tokenizer, backend="causal",
-        batch_size=batch_size, max_length=max_length,
+        batch_size=batch_size, max_length=max_length, max_batch_size=max_batch_size,
     )
     results = evaluator.simple_evaluate(
         model=wrapped, tasks=requested, num_fewshot=num_fewshot,
