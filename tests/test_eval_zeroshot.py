@@ -63,6 +63,72 @@ def test_auto_batch_size(checkpoint):
     assert args.max_batch_size == 4
 
 
+def test_pytorch_backend_leaves_model_unchanged(checkpoint):
+    args = entry.parse_args(["--model_path", str(checkpoint), "--backend", "pytorch"])
+    model = Mock()
+    assert entry.prepare_backend(model, "tokenizer", args) == "pytorch"
+    model.assert_not_called()
+
+
+@pytest.mark.parametrize("extra", [["--is_fp"], ["--model_dtype", "bfloat16"], ["--device", "cpu"]])
+def test_triton_backend_rejects_unsupported_settings(checkpoint, extra):
+    args = entry.parse_args(["--model_path", str(checkpoint), "--backend", "triton", *extra])
+    model = Mock()
+    model.config.model_type = "qwen3_moe"
+    with pytest.raises(ValueError, match="packed Qwen3 FP16"):
+        entry.prepare_backend(model, "tokenizer", args)
+
+
+def test_auto_backend_keeps_unsupported_expert_layout(checkpoint):
+    model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_moe"),
+        model=SimpleNamespace(layers=[SimpleNamespace(mlp=SimpleNamespace(experts=object()))]),
+    )
+    args = entry.parse_args(["--model_path", str(checkpoint)])
+    assert entry.prepare_backend(model, "tokenizer", args) == "pytorch"
+    args.backend = "triton"
+    with pytest.raises(ValueError, match="ModuleList experts"):
+        entry.prepare_backend(model, "tokenizer", args)
+
+
+@pytest.mark.parametrize("offset", [0.0, 1.0, float("nan")])
+def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch, offset):
+    import torch
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = torch.nn.Embedding(16, 8)
+            self.config = SimpleNamespace(model_type="qwen3_moe")
+            self.model = SimpleNamespace(layers=[
+                SimpleNamespace(mlp=SimpleNamespace(experts=torch.nn.ModuleList()))
+            ])
+            self.offset = 0.0
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+        def forward(self, ids, use_cache=False):
+            assert not use_cache
+            logits = torch.arange(16, dtype=torch.float32).expand(*ids.shape, 16) + self.offset
+            return SimpleNamespace(logits=logits)
+
+    model = TinyModel()
+    tokenizer = Mock(return_value=SimpleNamespace(input_ids=torch.tensor([[1, 2, 3]])))
+    patch = ModuleType("gemq.inference.patch")
+    patch.prepare_for_inference = Mock(side_effect=lambda model, *a, **kw: setattr(model, "offset", offset))
+    monkeypatch.setitem(sys.modules, "gemq.inference.patch", patch)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    args = entry.parse_args(["--model_path", str(checkpoint)])
+    if offset == 0:
+        assert entry.prepare_backend(model, tokenizer, args) == "triton"
+        assert all(not parameter.requires_grad for parameter in model.parameters())
+    else:
+        with pytest.raises(RuntimeError, match="numerical check"):
+            entry.prepare_backend(model, tokenizer, args)
+    patch.prepare_for_inference.assert_called_once_with(model, "Qwen/Qwen3-30B-A3B", is_fp=False)
+
+
 @pytest.mark.parametrize("name", ["zeroshot.json", "zeroshot.log", "config.json"])
 def test_existing_files_are_not_overwritten(checkpoint, name):
     path = checkpoint / name
