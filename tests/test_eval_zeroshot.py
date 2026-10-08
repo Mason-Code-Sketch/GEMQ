@@ -119,7 +119,7 @@ def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch,
     patch.prepare_for_inference = Mock(side_effect=lambda model, *a, **kw: setattr(model, "offset", offset))
     monkeypatch.setitem(sys.modules, "gemq.inference.patch", patch)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
-    args = entry.parse_args(["--model_path", str(checkpoint)])
+    args = entry.parse_args(["--model_path", str(checkpoint), "--backend", "triton"])
     if offset == 0:
         assert entry.prepare_backend(model, tokenizer, args) == "triton"
         assert all(not parameter.requires_grad for parameter in model.parameters())
