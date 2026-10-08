@@ -66,7 +66,7 @@ def create_gemlite_from_hqq(hqq_layer, **kwargs):
 
     # re-pack weights for inference on triton kernels
     gemlite_linear.pack(
-        W_q, scales, zeros, bias=bias, packing_bitwidth=32
+        W_q, scales, zeros, bias=bias, packing_bitwidth=32, fma_mode=False
     )
 
     return gemlite_linear
