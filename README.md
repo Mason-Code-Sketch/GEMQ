@@ -149,9 +149,9 @@ python -m gemq.eval_zeroshot --model_path "$CHECKPOINT_DIR" --batch_size auto --
 The default suite is PIQA, ARC-Easy, ARC-Challenge, HellaSwag, WinoGrande, MathQA,
 and MMLU. It uses LM Evaluation Harness 0.4.13, zero shots, the native task prompts,
 and no chat template. Scores use `acc_norm` when available, otherwise `acc`.
-On this DGX branch, `--backend auto` (the default) enables the existing GEMQ
+`--backend auto` (the default) enables the existing GEMQ
 Triton MoE kernels and GemLite attention linears for packed Qwen3 FP16 models on
-CUDA. It compares logits and mean token log-probabilities with the PyTorch
+CUDA with the supported ModuleList expert layout. It compares logits and mean token log-probabilities with the PyTorch
 backend on single-sequence and batched inputs before evaluating tasks; a failed
 check stops evaluation. Other models retain the PyTorch backend. Use
 `--backend pytorch` to explicitly evaluate with HQQ's original forward.

@@ -79,6 +79,18 @@ def test_triton_backend_rejects_unsupported_settings(checkpoint, extra):
         entry.prepare_backend(model, "tokenizer", args)
 
 
+def test_auto_backend_keeps_unsupported_expert_layout(checkpoint):
+    model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_moe"),
+        model=SimpleNamespace(layers=[SimpleNamespace(mlp=SimpleNamespace(experts=object()))]),
+    )
+    args = entry.parse_args(["--model_path", str(checkpoint)])
+    assert entry.prepare_backend(model, "tokenizer", args) == "pytorch"
+    args.backend = "triton"
+    with pytest.raises(ValueError, match="ModuleList experts"):
+        entry.prepare_backend(model, "tokenizer", args)
+
+
 @pytest.mark.parametrize("offset", [0.0, 1.0, float("nan")])
 def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch, offset):
     import torch
@@ -88,6 +100,9 @@ def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch,
             super().__init__()
             self.embedding = torch.nn.Embedding(16, 8)
             self.config = SimpleNamespace(model_type="qwen3_moe")
+            self.model = SimpleNamespace(layers=[
+                SimpleNamespace(mlp=SimpleNamespace(experts=torch.nn.ModuleList()))
+            ])
             self.offset = 0.0
 
         def get_input_embeddings(self):
