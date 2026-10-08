@@ -120,11 +120,15 @@ def prepare_backend(model, tokenizer, args):
         not args.is_fp and model.config.model_type == "qwen3_moe"
         and args.device.startswith("cuda") and args.model_dtype == "float16"
     )
+    if supported:
+        experts = [layer.mlp.experts for layer in model.model.layers if hasattr(layer.mlp, "experts")]
+        supported = bool(experts) and all(isinstance(group, torch.nn.ModuleList) for group in experts)
     backend = ("triton" if supported else "pytorch") if args.backend == "auto" else args.backend
     if backend == "pytorch":
         return backend
     if not supported:
-        raise ValueError("The Triton evaluation backend requires a packed Qwen3 FP16 model on CUDA")
+        raise ValueError("The Triton evaluation backend requires a packed Qwen3 FP16 model "
+                         "on CUDA with ModuleList experts")
 
     from gemq.inference.patch import prepare_for_inference
 
