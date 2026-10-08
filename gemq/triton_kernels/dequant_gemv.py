@@ -75,7 +75,7 @@ def dequant_splitk_gemv_kernel(
     C is of shape [1, N]: float16
 
     scales and zeros is of shape [num_groups, N]: float16
-    NOTE: dequant is computed as: B * scales + zeros
+    NOTE: dequant is computed as: (B - zeros) * scales
 
     NOTE: fix compute dtype to float16 for simplicity
     """

@@ -54,8 +54,9 @@ def parse_args(argv=None):
     parser.add_argument("--trust_remote_code", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
-    parser.add_argument("--backend", choices=("auto", "pytorch", "triton"), default="auto",
-                        help="auto uses validated GEMQ kernels for packed Qwen3 FP16 on CUDA")
+    parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "triton"), default="auto",
+                        help="auto caches decoded packed Qwen3 FP16 weights on CUDA; "
+                             "triton explicitly requests GEMQ fused kernels")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default=1)
     parser.add_argument("--max_batch_size", type=positive_int, default=8)
@@ -123,14 +124,12 @@ def prepare_backend(model, tokenizer, args):
     if supported:
         experts = [layer.mlp.experts for layer in model.model.layers if hasattr(layer.mlp, "experts")]
         supported = bool(experts) and all(isinstance(group, torch.nn.ModuleList) for group in experts)
-    backend = ("triton" if supported else "pytorch") if args.backend == "auto" else args.backend
+    backend = ("cached" if supported else "pytorch") if args.backend == "auto" else args.backend
     if backend == "pytorch":
         return backend
     if not supported:
-        raise ValueError("The Triton evaluation backend requires a packed Qwen3 FP16 model "
+        raise ValueError("The accelerated evaluation backend requires a packed Qwen3 FP16 model "
                          "on CUDA with ModuleList experts")
-
-    from gemq.inference.patch import prepare_for_inference
 
     # Check both single-sequence and batched prefill before evaluating any tasks.
     device = model.get_input_embeddings().weight.device
@@ -147,7 +146,14 @@ def prepare_backend(model, tokenizer, args):
         references.append((logits.cpu(), perf_counter() - start))
         del logits
 
-    prepare_for_inference(model, "Qwen/Qwen3-30B-A3B", is_fp=False)
+    if backend == "cached":
+        from gemq.inference.cached_linear import cache_quantized_linears
+
+        cache_quantized_linears(model)
+    else:
+        from gemq.inference.patch import prepare_for_inference
+
+        prepare_for_inference(model, "Qwen/Qwen3-30B-A3B", is_fp=False)
     model.eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
@@ -167,11 +173,11 @@ def prepare_backend(model, tokenizer, args):
         actual_ll = actual[:, :-1].log_softmax(-1).gather(-1, targets).mean().item()
         reference_ll = reference[:, :-1].log_softmax(-1).gather(-1, targets).mean().item()
         ll_error = abs(actual_ll - reference_ll)
-        print(f"Triton check shape={tuple(ids.shape)} logits_relative_error={relative_error:.6g} "
+        print(f"{backend.capitalize()} check shape={tuple(ids.shape)} logits_relative_error={relative_error:.6g} "
               f"mean_logprob_error={ll_error:.6g} pytorch_seconds={reference_seconds:.3f} "
-              f"triton_seconds={seconds:.3f}", flush=True)
+              f"{backend}_seconds={seconds:.3f}", flush=True)
         if not torch.isfinite(actual).all() or relative_error > 0.005 or ll_error > 0.005:
-            raise RuntimeError("Triton backend failed the packed-model numerical check")
+            raise RuntimeError(f"{backend.capitalize()} backend failed the packed-model numerical check")
         del logits
     return backend
 

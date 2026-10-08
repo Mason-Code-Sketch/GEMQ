@@ -193,7 +193,7 @@ def unpack_over_cols_triton(
 def dequantize(b, scales, zeros, q_shift, unpack_mask: tl.constexpr):
     """
     Dequantize packed quantized matrix B.
-    NOTE: dequant is computed as: B * scales + zeros
+    NOTE: dequant is computed as: (B - zeros) * scales
 
     Args:
         b:       [BLOCK_SIZE_K, BLOCK_SIZE_N] int32 packed quantized matrix
@@ -205,8 +205,8 @@ def dequantize(b, scales, zeros, q_shift, unpack_mask: tl.constexpr):
     """
     b = (b >> q_shift) & unpack_mask # int32 -> int32
 
-    # dequantize
-    # NOTE: fixed to float16
-    b = tl.fma(b.to(tl.float16), scales, zeros) # b*scales + zeros
+    # Match HQQ's FP16 subtraction before multiplication, including fractional zeros.
+    b = (b.to(tl.float16) - zeros).to(tl.float16)
+    b = (b * scales).to(tl.float16)
 
     return b
