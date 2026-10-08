@@ -3,10 +3,8 @@ Level 1: does a single real-quant linear compute the same thing as an fp16 matmu
 against the dequantized weight?
 
 This pins down the two conventions the rest of the stack silently depends on:
-  * the scales/zeros meaning. GPTQ/RTN dequantize as (Q - zeros) * scales, while
-    the Triton helper in triton_kernels/utils.py computes b * scales + zeros. That
-    only lines up if GemLite's pack() rewrites zeros into -zeros*scales, which is
-    nowhere asserted in the codebase.
+  * the scales/zeros meaning. GPTQ/RTN and the Triton helper both dequantize as
+    (Q - zeros) * scales, retaining fractional zero-points and FP16 rounding.
   * the 3-bit pack/unpack round trip, including the padding-row truncation in
     patch.create_gemlite_from_hqq.
 
@@ -27,6 +25,31 @@ NUM_TOKENS = 16
 
 # how many times the plain-fp16-matmul error the kernel is allowed to be
 KERNEL_ERROR_BUDGET = 5.0
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("nbits", [1, 2, 3, 4])
+def test_gemlite_keeps_fractional_zero_points(device, nbits):
+    from gemq.inference.patch import create_gemlite_from_hqq
+    from gemq.utils.quant_utils import create_hqq_linear_from_quantized_weights
+
+    torch.manual_seed(0)
+    shape = (OUT_FEATURES, IN_FEATURES)
+    groups = OUT_FEATURES * IN_FEATURES // 128
+    q = torch.randint(0, 2 ** nbits, (groups, 128), device=device, dtype=torch.uint8)
+    scales = (torch.rand(groups, 1, device=device) * 0.1 + 0.01).half()
+    zeros = (torch.rand(groups, 1, device=device) * (2 ** nbits - 1)).half()
+    hqq = create_hqq_linear_from_quantized_weights(
+        q, scales, zeros, shape, nbits, 128, device=device,
+    )
+    gem = create_gemlite_from_hqq(hqq)
+    assert gem.W_group_mode == 3
+    assert torch.equal(gem.zeros.t().reshape_as(zeros), zeros)
+    x = torch.randn(NUM_TOKENS, IN_FEATURES, device=device).half()
+    from gemq.triton_kernels.dequant_gemm import dequant_gemm_triton
+    actual = dequant_gemm_triton(x, gem.W_q, gem.scales, gem.zeros, nbits, 128)
+    expected = F.linear(x, hqq.dequantize())
+    assert relative_error(actual, expected) < 1e-3
 
 
 @pytest.mark.cuda
