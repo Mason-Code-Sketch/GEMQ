@@ -54,6 +54,8 @@ def parse_args(argv=None):
     parser.add_argument("--trust_remote_code", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
+    parser.add_argument("--backend", choices=("auto", "pytorch", "triton"), default="auto",
+                        help="auto uses validated GEMQ kernels for packed Qwen3 FP16 on CUDA")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default=1)
     parser.add_argument("--max_batch_size", type=positive_int, default=8)
@@ -108,7 +110,66 @@ def load_model(args):
     model.eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
+    args.backend = prepare_backend(model, tokenizer, args)
     return model, tokenizer
+
+
+@torch.inference_mode()
+def prepare_backend(model, tokenizer, args):
+    supported = (
+        not args.is_fp and model.config.model_type == "qwen3_moe"
+        and args.device.startswith("cuda") and args.model_dtype == "float16"
+    )
+    backend = ("triton" if supported else "pytorch") if args.backend == "auto" else args.backend
+    if backend == "pytorch":
+        return backend
+    if not supported:
+        raise ValueError("The Triton evaluation backend requires a packed Qwen3 FP16 model on CUDA")
+
+    from gemq.inference.patch import prepare_for_inference
+
+    # Check both single-sequence and batched prefill before evaluating any tasks.
+    device = model.get_input_embeddings().weight.device
+    tokens = tokenizer("The following text is used to check quantized inference.",
+                       return_tensors="pt").input_ids.to(device)
+    inputs = [tokens.repeat(batch, (length + tokens.shape[1] - 1) // tokens.shape[1])[:, :length]
+              for batch, length in ((1, 32), (2, 128))]
+    references = []
+    for ids in inputs:
+        torch.cuda.synchronize()
+        start = perf_counter()
+        logits = model(ids, use_cache=False).logits
+        torch.cuda.synchronize()
+        references.append((logits.cpu(), perf_counter() - start))
+        del logits
+
+    prepare_for_inference(model, "Qwen/Qwen3-30B-A3B", is_fp=False)
+    model.eval()
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for ids, (reference, reference_seconds) in zip(inputs, references):
+        # Exclude first-use compilation from steady-state timings.
+        warmup = model(ids, use_cache=False)
+        del warmup
+        torch.cuda.synchronize()
+        start = perf_counter()
+        logits = model(ids, use_cache=False).logits
+        torch.cuda.synchronize()
+        seconds = perf_counter() - start
+        actual = logits.float().cpu()
+        reference = reference.float()
+        relative_error = ((actual - reference).norm() / reference.norm().clamp_min(1e-12)).item()
+        targets = ids[:, 1:].cpu().unsqueeze(-1)
+        actual_ll = actual[:, :-1].log_softmax(-1).gather(-1, targets).mean().item()
+        reference_ll = reference[:, :-1].log_softmax(-1).gather(-1, targets).mean().item()
+        ll_error = abs(actual_ll - reference_ll)
+        print(f"Triton check shape={tuple(ids.shape)} logits_relative_error={relative_error:.6g} "
+              f"mean_logprob_error={ll_error:.6g} pytorch_seconds={reference_seconds:.3f} "
+              f"triton_seconds={seconds:.3f}", flush=True)
+        if not torch.isfinite(actual).all() or relative_error > 0.005 or ll_error > 0.005:
+            raise RuntimeError("Triton backend failed the packed-model numerical check")
+        del logits
+    return backend
 
 
 def main(argv=None):
@@ -145,6 +206,7 @@ def main(argv=None):
                 "model_path": str(args.model_path), "is_fp": args.is_fp,
                 "model_class": describe_model_impl(model), "model_dtype": args.model_dtype,
                 "device": args.device, "trust_remote_code": args.trust_remote_code,
+                "backend": args.backend,
                 "tasks": args.tasks, "include_gsm8k": args.include_gsm8k,
                 "num_fewshot": 0, "apply_chat_template": False,
                 "batch_size": args.batch_size, "max_length": args.max_length,
