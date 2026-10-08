@@ -36,7 +36,7 @@ def test_gemlite_keeps_fractional_zero_points(device, nbits):
     torch.manual_seed(0)
     shape = (OUT_FEATURES, IN_FEATURES)
     groups = OUT_FEATURES * IN_FEATURES // 128
-    q = torch.randint(0, 2 ** nbits, (groups, 128), device=device, dtype=torch.uint8)
+    q = torch.randint(0, 2 ** nbits, (groups, 128), device=device).half()
     scales = (torch.rand(groups, 1, device=device) * 0.1 + 0.01).half()
     zeros = (torch.rand(groups, 1, device=device) * (2 ** nbits - 1)).half()
     hqq = create_hqq_linear_from_quantized_weights(
@@ -50,6 +50,9 @@ def test_gemlite_keeps_fractional_zero_points(device, nbits):
     actual = dequant_gemm_triton(x, gem.W_q, gem.scales, gem.zeros, nbits, 128)
     expected = F.linear(x, hqq.dequantize())
     assert relative_error(actual, expected) < 1e-3
+    from gemq.inference.cached_linear import CachedQuantLinear
+    cached = CachedQuantLinear(hqq)
+    assert torch.equal(cached(x), hqq(x))
 
 
 @pytest.mark.cuda
