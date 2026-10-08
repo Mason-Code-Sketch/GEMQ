@@ -72,7 +72,7 @@ def dequant_splitk_gemv_kernel(
 
     A is of shape [1, K]: float16
     B is of shape [K//elements_per_sample, N]: int32 as a packed matrix
-    C is of shape [1, N]: float16
+    C is of shape [1, N]: float32 accumulation buffer
 
     scales and zeros is of shape [num_groups, N]: float16
     NOTE: dequant is computed as: (B - zeros) * scales
@@ -134,7 +134,8 @@ def dequant_splitk_gemv_triton(
     _, N = w_q.shape
 
     # allocates output
-    output = torch.zeros((M, N), device=x.device, dtype=torch.float16)
+    # Accumulate split-K partial sums before rounding the final output to FP16.
+    output = torch.zeros((M, N), device=x.device, dtype=torch.float32)
 
     # 2D grid
     grid = lambda META: (triton.cdiv(N, META["BLOCK_SIZE_N"]), triton.cdiv(K, META["BLOCK_SIZE_K"]))
@@ -153,7 +154,7 @@ def dequant_splitk_gemv_triton(
         # BLOCK_SIZE_K=64,
     )
 
-    return output
+    return output.to(torch.float16)
 
 
 @triton.autotune(
