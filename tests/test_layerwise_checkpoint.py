@@ -51,16 +51,20 @@ def test_layerwise_cached_checkpoint(model_path):
         return outputs, timings
 
     torch.manual_seed(0)
+    for device in range(4):
+        torch.cuda.reset_peak_memory_stats(device)
     baseline = load_quantized_model(str(path), compute_dtype=torch.float16, device="cuda:0")
     assert baseline.config.model_type == "deepseek_v2"
     baseline.eval()
     references, baseline_seconds = measure(baseline)
     baseline_piqa = run_lm_eval(baseline, tokenizer, tasks=["piqa"], batch_size="auto", max_batch_size=8, limit=4, seed=0)
+    print("Baseline allocated peaks GiB:", [torch.cuda.max_memory_allocated(i) / 2**30 for i in range(4)], flush=True)
     del baseline
     gc.collect()
     for device in range(4):
         with torch.cuda.device(device):
             torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats(device)
 
     start = perf_counter()
     optimized = load_quantized_model(str(path), compute_dtype=torch.float16, device="cpu")
@@ -81,10 +85,11 @@ def test_layerwise_cached_checkpoint(model_path):
         assert torch.equal(*scores)
         assert torch.equal(actual.argmax(-1), reference.argmax(-1))
     actual_piqa = run_lm_eval(optimized, tokenizer, tasks=["piqa"], batch_size="auto", max_batch_size=8, limit=4, seed=0)
+    print("Cached allocated peaks GiB:", [torch.cuda.max_memory_allocated(i) / 2**30 for i in range(4)], flush=True)
     assert actual_piqa["summary"] == baseline_piqa["summary"]
     for index, (before, after) in enumerate(zip(baseline_seconds, cached_seconds)):
         print(f"case={index} pytorch_seconds={before:.6f} cached_seconds={after:.6f} speedup={before/after:.3f}", flush=True)
-    assert sum(cached_seconds) < sum(baseline_seconds), "No measured speed improvement"
+    assert sum(cached_seconds) < 0.95 * sum(baseline_seconds), "Speed improvement must exceed 5%"
     with (path / "qmodel.pt").open("rb") as stream:
         assert hashlib.file_digest(stream, "sha256").hexdigest() == source_hash
     print("LAYERWISE_SMOKE_PASSED exact_logits=true exact_scores=true piqa_equal=true", flush=True)

@@ -173,6 +173,26 @@ def test_invalid_accuracy_fails(value):
         eval_utils.summarize_lm_eval(output, ["piqa"])
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_deepseek_scoring_disables_and_restores_kv_cache(monkeypatch, fails):
+    evaluator, _ = mock_harness(monkeypatch, results())
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v2", use_cache=True))
+
+    def evaluate(**kwargs):
+        assert model.config.use_cache is False
+        if fails:
+            raise RuntimeError("evaluation failed")
+        return results()
+
+    evaluator.side_effect = evaluate
+    if fails:
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            eval_utils.run_lm_eval(model, "tokenizer", tasks=eval_utils.ZEROSHOT_TASKS)
+    else:
+        eval_utils.run_lm_eval(model, "tokenizer", tasks=eval_utils.ZEROSHOT_TASKS)
+    assert model.config.use_cache is True
+
+
 def test_harness_receives_batch_limit_seeds_and_zero_shot(monkeypatch):
     evaluate, wrapper = mock_harness(monkeypatch, results())
     output = eval_utils.run_lm_eval(

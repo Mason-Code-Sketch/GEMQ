@@ -221,12 +221,21 @@ def run_lm_eval(
         pretrained=model, tokenizer=tokenizer, backend="causal",
         batch_size=batch_size, max_length=max_length, max_batch_size=max_batch_size,
     )
-    results = evaluator.simple_evaluate(
-        model=wrapped, tasks=requested, num_fewshot=num_fewshot,
-        limit=limit, log_samples=False, apply_chat_template=False,
-        random_seed=seed, numpy_random_seed=seed, torch_random_seed=seed,
-        fewshot_random_seed=seed,
-    )
+    config = getattr(model, "config", None)
+    disable_cache = getattr(config, "model_type", None) == "deepseek_v2"
+    if disable_cache:
+        use_cache = config.use_cache
+        config.use_cache = False
+    try:
+        results = evaluator.simple_evaluate(
+            model=wrapped, tasks=requested, num_fewshot=num_fewshot,
+            limit=limit, log_samples=False, apply_chat_template=False,
+            random_seed=seed, numpy_random_seed=seed, torch_random_seed=seed,
+            fewshot_random_seed=seed,
+        )
+    finally:
+        if disable_cache:
+            config.use_cache = use_cache
     if results is None:
         raise RuntimeError("Downstream evaluation returned no results")
     summary = summarize_lm_eval(results, tasks, include_gsm8k)
