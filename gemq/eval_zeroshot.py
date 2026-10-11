@@ -53,6 +53,8 @@ def parse_args(argv=None):
     parser.add_argument("--is_fp", action="store_true", help="Load a floating-point HF checkpoint")
     parser.add_argument("--trust_remote_code", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--layer-devices", nargs="+", metavar="CUDA_DEVICE",
+                        help="Place packed DeepSeek decoder layers across these CUDA devices and cache decoded weights")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "triton"), default="auto",
                         help="auto caches decoded packed Qwen3 FP16 weights on CUDA; "
@@ -70,6 +72,13 @@ def parse_args(argv=None):
         parser.error("--tasks must not contain duplicates")
     if args.limit is not None and args.output is not None:
         parser.error("--limit reports to the terminal and cannot be combined with --output")
+    if args.layer_devices:
+        if args.is_fp or args.model_dtype != "float16" or args.backend not in ("auto", "cached"):
+            parser.error("--layer-devices requires a packed FP16 checkpoint and auto/cached backend")
+        if len(set(args.layer_devices)) != len(args.layer_devices) or any(
+            not device.startswith("cuda:") or not device[5:].isdigit() for device in args.layer_devices
+        ):
+            parser.error("--layer-devices requires distinct explicit CUDA devices, e.g. cuda:0 cuda:1")
     return args
 
 
@@ -93,6 +102,15 @@ def result_path(args):
 
 
 def load_model(args):
+    if args.layer_devices:
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(str(args.model_path), trust_remote_code=args.trust_remote_code)
+        if config.model_type != "deepseek_v2":
+            raise ValueError("Layerwise cached evaluation currently supports packed DeepSeek-V2 only")
+        if any(int(device[5:]) >= torch.cuda.device_count() for device in args.layer_devices):
+            raise ValueError("Requested layer device is not visible")
+        from gemq.utils.hf_loading import ensure_deepseek_v2_remote_code_compat
+        ensure_deepseek_v2_remote_code_compat()
     tokenizer = AutoTokenizer.from_pretrained(
         str(args.model_path), trust_remote_code=args.trust_remote_code,
     )
@@ -104,9 +122,12 @@ def load_model(args):
         )
     else:
         model = load_quantized_model(
-            str(args.model_path), compute_dtype=dtype, device=args.device,
+            str(args.model_path), compute_dtype=dtype, device="cpu" if args.layer_devices else args.device,
             trust_remote_code=args.trust_remote_code,
         )
+        if args.layer_devices:
+            from gemq.inference.layerwise import distribute_packed_model
+            model = distribute_packed_model(model, args.layer_devices)
     align_deepseek_softmax_scale(model)
     model.eval()
     for parameter in model.parameters():
@@ -121,13 +142,14 @@ def prepare_backend(model, tokenizer, args):
         not args.is_fp and model.config.model_type == "qwen3_moe"
         and args.device.startswith("cuda") and args.model_dtype == "float16"
     )
+    layerwise = bool(args.layer_devices)
     if supported:
         experts = [layer.mlp.experts for layer in model.model.layers if hasattr(layer.mlp, "experts")]
         supported = bool(experts) and all(isinstance(group, torch.nn.ModuleList) for group in experts)
-    backend = ("cached" if supported else "pytorch") if args.backend == "auto" else args.backend
+    backend = ("cached" if supported or layerwise else "pytorch") if args.backend == "auto" else args.backend
     if backend == "pytorch":
         return backend
-    if not supported:
+    if not supported and not layerwise:
         raise ValueError("The accelerated evaluation backend requires a packed Qwen3 FP16 model "
                          "on CUDA with ModuleList experts")
 
@@ -178,6 +200,8 @@ def prepare_backend(model, tokenizer, args):
               f"{backend}_seconds={seconds:.3f}", flush=True)
         if not torch.isfinite(actual).all() or relative_error > 0.005 or ll_error > 0.005:
             raise RuntimeError(f"{backend.capitalize()} backend failed the packed-model numerical check")
+        if layerwise and not torch.equal(actual, reference):
+            raise RuntimeError("Layerwise cache must preserve packed logits exactly")
         del logits
     return backend
 
@@ -216,6 +240,7 @@ def main(argv=None):
                 "model_path": str(args.model_path), "is_fp": args.is_fp,
                 "model_class": describe_model_impl(model), "model_dtype": args.model_dtype,
                 "device": args.device, "trust_remote_code": args.trust_remote_code,
+                "layer_devices": args.layer_devices,
                 "backend": args.backend,
                 "tasks": args.tasks, "include_gsm8k": args.include_gsm8k,
                 "num_fewshot": 0, "apply_chat_template": False,
