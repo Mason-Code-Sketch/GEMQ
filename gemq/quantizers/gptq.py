@@ -66,9 +66,9 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         min_val = torch.minimum(x.amin(dim=1, keepdim=True), tmp)  # (N_filter,1)
         max_val = torch.maximum(x.amax(dim=1, keepdim=True), tmp)  # (N_filter,1)
         
-        tmp = (min_val == 0) & (max_val == 0)
-        min_val[tmp] = -1
-        max_val[tmp] = +1
+        zero_groups = (min_val == 0) & (max_val == 0)
+        min_val[zero_groups] = -1
+        max_val[zero_groups] = +1
 
         scales = (max_val - min_val) / max_int  # (N_filter,1)
         zeros = -min_val / scales  # (N_filter,1)
@@ -103,6 +103,10 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
                     scales[tmp] = tmp_scales[tmp]
                     zeros[tmp] = tmp_zeros[tmp]
 
+        # Floating zero-points need an exact zero code for all-zero groups.
+        # Preserve GPTQ's dead-column clearing instead of decoding a constant.
+        scales[zero_groups] = 1
+        zeros[zero_groups] = 0
         return scales, zeros, max_int
 
     @staticmethod
