@@ -55,7 +55,7 @@ def parse_args(argv=None):
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--layer-devices", nargs="+", metavar="CUDA_DEVICE",
                         help="Distribute packed DeepSeek, Qwen1.5, Qwen3 or Mixtral decoder layers "
-                             "over the listed CUDA devices and cache decoded weights")
+                             "over the listed CUDA devices")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "triton"), default="auto",
                         help="auto caches packed Qwen3 FP16 weights or any supported --layer-devices model; "
@@ -74,8 +74,8 @@ def parse_args(argv=None):
     if args.limit is not None and args.output is not None:
         parser.error("--limit reports to the terminal and cannot be combined with --output")
     if args.layer_devices:
-        if args.is_fp or args.model_dtype != "float16" or args.backend not in ("auto", "cached"):
-            parser.error("--layer-devices requires a packed FP16 checkpoint and auto/cached backend")
+        if args.is_fp or args.model_dtype != "float16" or args.backend not in ("auto", "cached", "triton"):
+            parser.error("--layer-devices requires a packed FP16 checkpoint and auto/cached/triton backend")
         if len(set(args.layer_devices)) != len(args.layer_devices) or any(
             not device.startswith("cuda:") or not device[5:].isdigit() for device in args.layer_devices
         ):
@@ -146,7 +146,12 @@ def prepare_backend(model, tokenizer, args):
         and args.device.startswith("cuda") and args.model_dtype == "float16"
     )
     layerwise = bool(args.layer_devices)
-    if supported:
+    if args.backend == "triton":
+        from gemq.inference.layerwise import LAYERWISE_MODEL_TYPES
+        supported = (not args.is_fp and args.model_dtype == "float16"
+                     and model.config.model_type in LAYERWISE_MODEL_TYPES
+                     and args.device.startswith("cuda"))
+    if supported and args.backend != "triton":
         experts = [layer.mlp.experts for layer in model.model.layers if hasattr(layer.mlp, "experts")]
         supported = bool(experts) and all(isinstance(group, torch.nn.ModuleList) for group in experts)
     backend = ("cached" if supported or layerwise else "pytorch") if args.backend == "auto" else args.backend
@@ -180,9 +185,10 @@ def prepare_backend(model, tokenizer, args):
 
         cache_quantized_linears(model)
     else:
-        from gemq.inference.patch import prepare_for_inference
+        from gemq.inference.triton_linear import use_triton_linears
 
-        prepare_for_inference(model, "Qwen/Qwen3-30B-A3B", is_fp=False)
+        if not use_triton_linears(model):
+            raise ValueError("No packed HQQ linears found for the Triton backend")
     model.eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
@@ -207,7 +213,7 @@ def prepare_backend(model, tokenizer, args):
               f"{backend}_seconds={seconds:.3f}", flush=True)
         if not torch.isfinite(actual).all() or relative_error > 0.005 or ll_error > 0.005:
             raise RuntimeError(f"{backend.capitalize()} backend failed the packed-model numerical check")
-        if layerwise and not torch.equal(actual, reference):
+        if layerwise and backend == "cached" and not torch.equal(actual, reference):
             raise RuntimeError("Layerwise cache must preserve packed logits exactly")
         del logits
     return backend

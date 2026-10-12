@@ -87,19 +87,21 @@ def test_auto_backend_keeps_unsupported_expert_layout(checkpoint):
     args = entry.parse_args(["--model_path", str(checkpoint)])
     assert entry.prepare_backend(model, "tokenizer", args) == "pytorch"
     args.backend = "triton"
-    with pytest.raises(ValueError, match="ModuleList experts"):
+    model.config.model_type = "unsupported"
+    with pytest.raises(ValueError, match="packed Qwen3 FP16"):
         entry.prepare_backend(model, "tokenizer", args)
 
 
 @pytest.mark.parametrize("offset", [0.0, 1.0, float("nan")])
-def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch, offset):
+@pytest.mark.parametrize("model_type", ["deepseek_v2", "qwen2_moe", "qwen3_moe", "mixtral"])
+def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch, offset, model_type):
     import torch
 
     class TinyModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.embedding = torch.nn.Embedding(16, 8)
-            self.config = SimpleNamespace(model_type="qwen3_moe")
+            self.config = SimpleNamespace(model_type=model_type)
             self.model = SimpleNamespace(layers=[
                 SimpleNamespace(mlp=SimpleNamespace(experts=torch.nn.ModuleList()))
             ])
@@ -115,9 +117,12 @@ def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch,
 
     model = TinyModel()
     tokenizer = Mock(return_value=SimpleNamespace(input_ids=torch.tensor([[1, 2, 3]])))
-    patch = ModuleType("gemq.inference.patch")
-    patch.prepare_for_inference = Mock(side_effect=lambda model, *a, **kw: setattr(model, "offset", offset))
-    monkeypatch.setitem(sys.modules, "gemq.inference.patch", patch)
+    patch = ModuleType("gemq.inference.triton_linear")
+    def replace(model):
+        model.offset = offset
+        return 1
+    patch.use_triton_linears = Mock(side_effect=replace)
+    monkeypatch.setitem(sys.modules, "gemq.inference.triton_linear", patch)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
     args = entry.parse_args(["--model_path", str(checkpoint), "--backend", "triton"])
     if offset == 0:
@@ -126,7 +131,7 @@ def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch,
     else:
         with pytest.raises(RuntimeError, match="numerical check"):
             entry.prepare_backend(model, tokenizer, args)
-    patch.prepare_for_inference.assert_called_once_with(model, "Qwen/Qwen3-30B-A3B", is_fp=False)
+    patch.use_triton_linears.assert_called_once_with(model)
 
 
 @pytest.mark.parametrize("name", ["zeroshot.json", "zeroshot.log", "config.json"])
