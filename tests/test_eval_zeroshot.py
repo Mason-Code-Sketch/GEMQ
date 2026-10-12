@@ -118,7 +118,7 @@ def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch,
     patch = ModuleType("gemq.inference.patch")
     patch.prepare_for_inference = Mock(side_effect=lambda model, *a, **kw: setattr(model, "offset", offset))
     monkeypatch.setitem(sys.modules, "gemq.inference.patch", patch)
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
     args = entry.parse_args(["--model_path", str(checkpoint), "--backend", "triton"])
     if offset == 0:
         assert entry.prepare_backend(model, tokenizer, args) == "triton"
@@ -171,6 +171,26 @@ def test_invalid_accuracy_fails(value):
     output["results"]["piqa"]["acc_norm,none"] = value
     with pytest.raises(ValueError):
         eval_utils.summarize_lm_eval(output, ["piqa"])
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_deepseek_scoring_disables_and_restores_kv_cache(monkeypatch, fails):
+    evaluator, _ = mock_harness(monkeypatch, results())
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v2", use_cache=True))
+
+    def evaluate(**kwargs):
+        assert model.config.use_cache is False
+        if fails:
+            raise RuntimeError("evaluation failed")
+        return results()
+
+    evaluator.side_effect = evaluate
+    if fails:
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            eval_utils.run_lm_eval(model, "tokenizer", tasks=eval_utils.ZEROSHOT_TASKS)
+    else:
+        eval_utils.run_lm_eval(model, "tokenizer", tasks=eval_utils.ZEROSHOT_TASKS)
+    assert model.config.use_cache is True
 
 
 def test_harness_receives_batch_limit_seeds_and_zero_shot(monkeypatch):
