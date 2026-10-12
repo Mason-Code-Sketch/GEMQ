@@ -17,6 +17,7 @@ def test_layerwise_cached_checkpoint(model_path):
     from hqq.core.quantize import HQQLinear
     from gemq.inference.cached_linear import cache_quantized_linears
     from gemq.inference.layerwise import distribute_packed_model
+    from gemq.inference.layerwise import LAYERWISE_MODEL_TYPES
     from gemq.utils.eval_utils import run_lm_eval
     from gemq.utils.hf_loading import ensure_deepseek_v2_remote_code_compat, load_quantized_model
 
@@ -54,7 +55,7 @@ def test_layerwise_cached_checkpoint(model_path):
     for device in range(4):
         torch.cuda.reset_peak_memory_stats(device)
     baseline = load_quantized_model(str(path), compute_dtype=torch.float16, device="cuda:0")
-    assert baseline.config.model_type == "deepseek_v2"
+    assert baseline.config.model_type in LAYERWISE_MODEL_TYPES
     baseline.eval()
     references, baseline_seconds = measure(baseline)
     baseline_piqa = run_lm_eval(baseline, tokenizer, tasks=["piqa"], batch_size="auto", max_batch_size=8, limit=4, seed=0)

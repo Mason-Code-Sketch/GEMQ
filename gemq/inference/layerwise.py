@@ -1,6 +1,8 @@
-"""Resident, contiguous-layer placement for packed DeepSeek evaluation."""
+"""Resident, configurable decoder-layer placement for packed MoE evaluation."""
 
 import torch
+
+LAYERWISE_MODEL_TYPES = frozenset({"deepseek_v2", "qwen2_moe", "qwen3_moe", "mixtral"})
 
 
 def layer_device_map(model, devices):
@@ -11,6 +13,8 @@ def layer_device_map(model, devices):
     for index in range(len(layers)):
         mapping[f"model.layers.{index}"] = devices[index * len(devices) // len(layers)]
     mapping.update({"model.norm": devices[-1], "lm_head": devices[-1]})
+    if getattr(getattr(model, "config", None), "tie_word_embeddings", False):
+        mapping["lm_head"] = devices[0]
     return mapping
 
 

@@ -118,7 +118,7 @@ def test_triton_backend_checks_logits_before_evaluation(checkpoint, monkeypatch,
     patch = ModuleType("gemq.inference.patch")
     patch.prepare_for_inference = Mock(side_effect=lambda model, *a, **kw: setattr(model, "offset", offset))
     monkeypatch.setitem(sys.modules, "gemq.inference.patch", patch)
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
     args = entry.parse_args(["--model_path", str(checkpoint), "--backend", "triton"])
     if offset == 0:
         assert entry.prepare_backend(model, tokenizer, args) == "triton"

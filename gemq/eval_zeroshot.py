@@ -54,10 +54,11 @@ def parse_args(argv=None):
     parser.add_argument("--trust_remote_code", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--layer-devices", nargs="+", metavar="CUDA_DEVICE",
-                        help="Place packed DeepSeek decoder layers across these CUDA devices and cache decoded weights")
+                        help="Distribute packed DeepSeek, Qwen1.5, Qwen3 or Mixtral decoder layers "
+                             "over the listed CUDA devices and cache decoded weights")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "triton"), default="auto",
-                        help="auto caches decoded packed Qwen3 FP16 weights on CUDA; "
+                        help="auto caches packed Qwen3 FP16 weights or any supported --layer-devices model; "
                              "triton explicitly requests GEMQ fused kernels")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default=1)
@@ -104,13 +105,15 @@ def result_path(args):
 def load_model(args):
     if args.layer_devices:
         from transformers import AutoConfig
+        from gemq.inference.layerwise import LAYERWISE_MODEL_TYPES
         config = AutoConfig.from_pretrained(str(args.model_path), trust_remote_code=args.trust_remote_code)
-        if config.model_type != "deepseek_v2":
-            raise ValueError("Layerwise cached evaluation currently supports packed DeepSeek-V2 only")
+        if config.model_type not in LAYERWISE_MODEL_TYPES:
+            raise ValueError(f"Unsupported layerwise model type: {config.model_type}")
         if any(int(device[5:]) >= torch.cuda.device_count() for device in args.layer_devices):
             raise ValueError("Requested layer device is not visible")
-        from gemq.utils.hf_loading import ensure_deepseek_v2_remote_code_compat
-        ensure_deepseek_v2_remote_code_compat()
+        if config.model_type == "deepseek_v2":
+            from gemq.utils.hf_loading import ensure_deepseek_v2_remote_code_compat
+            ensure_deepseek_v2_remote_code_compat()
     tokenizer = AutoTokenizer.from_pretrained(
         str(args.model_path), trust_remote_code=args.trust_remote_code,
     )
@@ -160,11 +163,15 @@ def prepare_backend(model, tokenizer, args):
     inputs = [tokens.repeat(batch, (length + tokens.shape[1] - 1) // tokens.shape[1])[:, :length]
               for batch, length in ((1, 32), (2, 128))]
     references = []
+    def synchronize():
+        for target in args.layer_devices or [str(device)]:
+            torch.cuda.synchronize(target)
+
     for ids in inputs:
-        torch.cuda.synchronize()
+        synchronize()
         start = perf_counter()
         logits = model(ids, use_cache=False).logits
-        torch.cuda.synchronize()
+        synchronize()
         references.append((logits.cpu(), perf_counter() - start))
         del logits
 
@@ -183,10 +190,10 @@ def prepare_backend(model, tokenizer, args):
         # Exclude first-use compilation from steady-state timings.
         warmup = model(ids, use_cache=False)
         del warmup
-        torch.cuda.synchronize()
+        synchronize()
         start = perf_counter()
         logits = model(ids, use_cache=False).logits
-        torch.cuda.synchronize()
+        synchronize()
         seconds = perf_counter() - start
         actual = logits.float().cpu()
         reference = reference.float()
