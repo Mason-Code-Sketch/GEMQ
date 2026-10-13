@@ -23,6 +23,7 @@ def test_grouped_cached_ppl(model_path):
         with (path / "qmodel.pt").open("rb") as stream:
             return hashlib.file_digest(stream, "sha256").hexdigest()
     before = source_hash()
+    torch.cuda.set_per_process_memory_fraction(min(1.0, 116 * 2**30 / torch.cuda.get_device_properties(0).total_memory))
     tokenizer = AutoTokenizer.from_pretrained(path)
     datasets = {name: get_testenc(tokenizer, name, 2048,
                 dataset_root=os.environ["GEMQ_GROUPED_DATASET_ROOT"]).input_ids
@@ -62,7 +63,12 @@ def test_grouped_cached_ppl(model_path):
         return results
 
     reference = evaluate("cached")
+    torch.cuda.reset_peak_memory_stats()
     install_grouped_cached(model)
+    print(f"GROUPED_CONVERSION allocated_gib={torch.cuda.memory_allocated()/2**30:.3f} "
+          f"reserved_gib={torch.cuda.memory_reserved()/2**30:.3f} "
+          f"peak_allocated_gib={torch.cuda.max_memory_allocated()/2**30:.3f} "
+          f"peak_reserved_gib={torch.cuda.max_memory_reserved()/2**30:.3f}", flush=True)
     actual = evaluate("grouped_cached")
     for name in datasets:
         old, old_ppl, old_seconds = reference[name]
