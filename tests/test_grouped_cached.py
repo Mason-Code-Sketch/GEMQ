@@ -86,7 +86,56 @@ def test_invalid_later_layer_fails_before_modification():
     assert isinstance(first.experts, nn.ModuleList)
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v2", "qwen2_moe", "mixtral"])
+@pytest.mark.parametrize("model_type", ["llama", "qwen2", "qwen3"])
 def test_unvalidated_model_types_are_rejected(model_type):
-    with pytest.raises(ValueError, match="Qwen3"):
+    with pytest.raises(ValueError, match="Unsupported"):
         backend.install_grouped_cached(SimpleNamespace(config=SimpleNamespace(model_type=model_type)))
+
+
+def test_deepseek_preserves_fp32_topk_sum_and_final_fp16_cast():
+    original = experts()
+    grouped = backend.GroupedCachedExperts(original, fp32_topk=True).eval()
+    hidden = torch.randn(7, 8).half()
+    indices = torch.tensor([[3, 0, 2]] * 7)
+    weights = torch.rand(7, 3, dtype=torch.float32)
+    values = torch.empty(7, 3, 8, dtype=torch.float16)
+    with torch.no_grad():
+        for expert_id, expert in enumerate(original):
+            tokens, slots = torch.where(indices == expert_id)
+            values[tokens, slots] = expert.down_proj(expert.act_fn(expert.gate_proj(hidden[tokens])) * expert.up_proj(hidden[tokens]))
+        reference = (values.float() * weights.unsqueeze(-1)).sum(1).half()
+        with patch.object(backend, "_linear", side_effect=linear_groups):
+            assert torch.equal(grouped(hidden, indices, weights), reference)
+
+
+def test_qwen1_fused_projection_preserves_fp32_weighted_contribution_rounding():
+    original = nn.Module()
+    original.num_experts, original.act_fn = 5, nn.functional.silu
+    for name, shape in (("gate_up_proj", (12, 8)), ("down_proj", (8, 6))):
+        projections = nn.ModuleList()
+        for _ in range(5):
+            weight = torch.randn(shape).half()
+            projections.append(CachedQuantLinear(SimpleNamespace(dequantize=lambda w=weight: w, bias=None)))
+        setattr(original, name, projections)
+    grouped = backend.GroupedCachedExperts(original).eval()
+    hidden, indices, weights = torch.randn(7, 8).half(), torch.tensor([[3, 0, 2]] * 7), torch.rand(7, 3)
+    reference = torch.zeros_like(hidden)
+    with torch.no_grad():
+        for expert_id in range(5):
+            slots, tokens = torch.where(indices.T == expert_id)
+            gate, up = original.gate_up_proj[expert_id](hidden[tokens]).chunk(2, -1)
+            value = original.down_proj[expert_id](original.act_fn(gate) * up)
+            reference.index_add_(0, tokens, (value * weights[tokens, slots, None]).half())
+        with patch.object(backend, "_linear", side_effect=linear_groups):
+            assert torch.equal(grouped(hidden, indices, weights), reference)
+
+
+def test_mixtral_projection_mapping_preserves_values():
+    original = experts()
+    for expert in original:
+        expert.w1, expert.w3, expert.w2 = expert.gate_proj, expert.up_proj, expert.down_proj
+        del expert.gate_proj, expert.up_proj, expert.down_proj
+    grouped = backend.GroupedCachedExperts(original)
+    assert torch.equal(grouped.gate_proj, torch.stack([e.w1.weight for e in original]))
+    assert torch.equal(grouped.up_proj, torch.stack([e.w3.weight for e in original]))
+    assert torch.equal(grouped.down_proj, torch.stack([e.w2.weight for e in original]))

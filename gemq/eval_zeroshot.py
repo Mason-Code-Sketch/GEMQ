@@ -146,7 +146,11 @@ def prepare_backend(model, tokenizer, args):
         and args.device.startswith("cuda") and args.model_dtype == "float16"
     )
     layerwise = bool(args.layer_devices)
-    if supported:
+    if args.backend == "grouped_cached":
+        supported = (not args.is_fp and args.model_dtype == "float16"
+                     and args.device.startswith("cuda")
+                     and model.config.model_type in ("qwen3_moe", "qwen2_moe", "mixtral", "deepseek_v2"))
+    elif supported:
         experts = [layer.mlp.experts for layer in model.model.layers if hasattr(layer.mlp, "experts")]
         supported = bool(experts) and all(isinstance(group, torch.nn.ModuleList) for group in experts)
     backend = ("cached" if supported or layerwise else "pytorch") if args.backend == "auto" else args.backend
