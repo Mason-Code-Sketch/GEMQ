@@ -57,7 +57,7 @@ def parse_args(argv=None):
                         help="Distribute packed DeepSeek, Qwen1.5, Qwen3 or Mixtral decoder layers "
                              "over the listed CUDA devices and cache decoded weights")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
-    parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "triton"), default="auto",
+    parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "grouped_cached", "triton"), default="auto",
                         help="auto caches packed Qwen3 FP16 weights or any supported --layer-devices model; "
                              "triton explicitly requests GEMQ fused kernels")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
@@ -74,7 +74,7 @@ def parse_args(argv=None):
     if args.limit is not None and args.output is not None:
         parser.error("--limit reports to the terminal and cannot be combined with --output")
     if args.layer_devices:
-        if args.is_fp or args.model_dtype != "float16" or args.backend not in ("auto", "cached"):
+        if args.is_fp or args.model_dtype != "float16" or args.backend not in ("auto", "cached", "grouped_cached"):
             parser.error("--layer-devices requires a packed FP16 checkpoint and auto/cached backend")
         if len(set(args.layer_devices)) != len(args.layer_devices) or any(
             not device.startswith("cuda:") or not device[5:].isdigit() for device in args.layer_devices
@@ -175,10 +175,13 @@ def prepare_backend(model, tokenizer, args):
         references.append((logits.cpu(), perf_counter() - start))
         del logits
 
-    if backend == "cached":
+    if backend in ("cached", "grouped_cached"):
         from gemq.inference.cached_linear import cache_quantized_linears
 
         cache_quantized_linears(model)
+        if backend == "grouped_cached":
+            from gemq.inference.grouped_cached import install_grouped_cached
+            install_grouped_cached(model)
     else:
         from gemq.inference.patch import prepare_for_inference
 
@@ -207,7 +210,7 @@ def prepare_backend(model, tokenizer, args):
               f"{backend}_seconds={seconds:.3f}", flush=True)
         if not torch.isfinite(actual).all() or relative_error > 0.005 or ll_error > 0.005:
             raise RuntimeError(f"{backend.capitalize()} backend failed the packed-model numerical check")
-        if layerwise and not torch.equal(actual, reference):
+        if (layerwise or backend == "grouped_cached") and not torch.equal(actual, reference):
             raise RuntimeError("Layerwise cache must preserve packed logits exactly")
         del logits
     return backend
