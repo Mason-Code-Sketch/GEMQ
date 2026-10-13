@@ -26,6 +26,7 @@ def test_grouped_cached_checkpoint(model_path):
             return hashlib.file_digest(stream, "sha256").hexdigest()
     before = source_hash()
     torch.manual_seed(0)
+    torch.cuda.set_per_process_memory_fraction(min(1.0, 116 * 2**30 / torch.cuda.get_device_properties(0).total_memory))
     tokenizer = AutoTokenizer.from_pretrained(path)
     model = load_quantized_model(str(path), compute_dtype=torch.float16, device="cuda:0").eval()
     cache_quantized_linears(model)
@@ -68,7 +69,12 @@ def test_grouped_cached_checkpoint(model_path):
 
     reference, before_seconds = measure()
     before_options, before_summary = options()
+    torch.cuda.reset_peak_memory_stats()
     install_grouped_cached(model)
+    print(f"GROUPED_CONVERSION allocated_gib={torch.cuda.memory_allocated()/2**30:.3f} "
+          f"reserved_gib={torch.cuda.memory_reserved()/2**30:.3f} "
+          f"peak_allocated_gib={torch.cuda.max_memory_allocated()/2**30:.3f} "
+          f"peak_reserved_gib={torch.cuda.max_memory_reserved()/2**30:.3f}", flush=True)
     model.eval()
     actual, after_seconds = measure()
     exact = True

@@ -139,3 +139,15 @@ def test_mixtral_projection_mapping_preserves_values():
     assert torch.equal(grouped.gate_proj, torch.stack([e.w1.weight for e in original]))
     assert torch.equal(grouped.up_proj, torch.stack([e.w3.weight for e in original]))
     assert torch.equal(grouped.down_proj, torch.stack([e.w2.weight for e in original]))
+
+
+def test_conversion_does_not_retain_a_gradient_graph_or_old_weights():
+    block = nn.Module()
+    block.experts = experts()
+    for expert in block.experts:
+        for name in ("gate_proj", "up_proj", "down_proj"):
+            getattr(expert, name).weight.requires_grad_(True)
+    model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_moe"),
+                            model=SimpleNamespace(layers=[SimpleNamespace(mlp=block)]))
+    backend.install_grouped_cached(model)
+    assert all(not tensor.requires_grad and tensor.grad_fn is None for tensor in block.experts.buffers())

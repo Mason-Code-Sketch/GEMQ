@@ -89,6 +89,7 @@ def grouped_deepseek_infer(self, hidden, indices, weights):
     return self.experts(hidden, indices, weights)
 
 
+@torch.no_grad()
 def install_grouped_cached(model):
     """Replace routed experts only; preserve routers, shared experts and attention."""
     kind = model.config.model_type
@@ -115,18 +116,17 @@ def install_grouped_cached(model):
             for proj in projections:
                 if not isinstance(proj, CachedQuantLinear) or proj.bias is not None or proj.weight.dtype != torch.float16:
                     raise ValueError("Expected cached FP16 bias-free expert projections")
-    devices = set()
+    del experts, projections, proj
     for block in blocks:
         fused = not isinstance(block.experts, nn.ModuleList)
         block.experts = GroupedCachedExperts(block.experts, fp32_topk=kind == "deepseek_v2").eval()
-        devices.add(block.experts.down_proj.device)
         if kind == "deepseek_v2":
             block.moe_infer = MethodType(grouped_deepseek_infer, block)
         elif not fused:
             attribute = "_old_forward" if hasattr(block, "_hf_hook") else "forward"
             setattr(block, attribute, MethodType(grouped_qwen3_forward, block))
-    # Release conversion-time allocator leftovers once, never during forwards.
-    for device in devices:
+        # Release old per-expert allocations after each layer, never in forwards.
+        device = block.experts.down_proj.device
         if device.type == "cuda":
             with torch.cuda.device(device):
                 torch.cuda.empty_cache()
