@@ -737,6 +737,11 @@ def parse_args():
         help="LayerGrads attention checkpoints; default is 32 for single-device integrated Qwen3, otherwise 0",
     )
 
+    parser.add_argument(
+        "--layer_grads_gpu_memory_gib", type=int, default=None,
+        help="Optional fixed GPU weight budget in GiB for LayerGrads auto placement",
+    )
+
     # quantization args
     parser.add_argument(
         "--wbits", type=str, default="1,2,3",
@@ -765,7 +770,10 @@ def parse_args():
         help="Optional JSON path for wall-time and GPU-memory accounting",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.layer_grads_gpu_memory_gib is not None and args.layer_grads_gpu_memory_gib <= 0:
+        parser.error("layer_grads_gpu_memory_gib must be positive")
+    return args
 
 
 def main(args) -> None:
@@ -778,6 +786,11 @@ def main(args) -> None:
             model = AutoModelForCausalLM.from_pretrained(
                 args.model,
                 device_map=("auto" if args.mode == "layer_grads" else "cpu"),
+                max_memory=(
+                    {0: args.layer_grads_gpu_memory_gib * 1024**3}
+                    if args.mode == "layer_grads" and args.layer_grads_gpu_memory_gib is not None
+                    else None
+                ),
                 torch_dtype=args.model_dtype,
                 attn_implementation=args.attn_impl,
                 trust_remote_code=True,
@@ -786,6 +799,10 @@ def main(args) -> None:
             model.seqlen = args.seqlen
             validate_qwen2_moe_model(model, args.model_name)
             if args.mode == "layer_grads":
+                print("LayerGrads placement:", json.dumps({
+                    "gpu_weight_budget_gib": args.layer_grads_gpu_memory_gib,
+                    "device_map": getattr(model, "hf_device_map", {}),
+                }), flush=True)
                 model.train()
             else:
                 model.eval()
