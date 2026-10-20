@@ -102,6 +102,23 @@ Run the Qwen3 scripts in order: `compute_stats_qwen3moe.sh`,
 need to be checked before a formal run.
 
 
+### Mixtral memory handling on DGX Spark
+
+Mixtral LayerRE generates one expert/bit candidate at a time and restores the
+original weights after each score, including on failure. Mapped output gradients
+are squared in FP64 one forward batch at a time; the native MoE forward and
+sample-wise reduction order are unchanged. Layer-local buffers are released
+before processing the next layer. GPTQ releases each finished linear's quantizer
+after storing its weights and packing metadata, without changing calibration.
+
+On a single integrated CUDA device, Mixtral LayerGrads checkpoints all 32
+attention blocks by default; `--attention_checkpoint_layers` still overrides it.
+Router fine-tuning checkpoints the 31 attention blocks after the first router.
+Experts are not checkpointed. Statistics and quantization remain FP16; router
+fine-tuning remains BF16 and restores the original dtype afterward. Full-model
+memory and CUDA numerical equivalence require validation before a formal run.
+
+
 ### 1. Bit Allocation
 
 > [!NOTE]

@@ -253,7 +253,7 @@ def compute_layer_grads(model, dataloader, args):
     if checkpoint_layers is None:
         checkpoint_layers = 0
         if (
-            NAME_TO_MODEL[args.model_name] == ModelType.QWEN3MOE
+            NAME_TO_MODEL[args.model_name] in (ModelType.QWEN3MOE, ModelType.MIXTRAL)
             and torch.cuda.device_count() == 1
             and getattr(torch.cuda.get_device_properties(0), "is_integrated", False)
         ):
@@ -328,8 +328,10 @@ def compute_layer_grads(model, dataloader, args):
 
 @torch.inference_mode()
 def compute_moe_reconstruction_error(
-    moe_block, block_inps, block_outs, layer_sq_grads, forward_batch_size
+    moe_block, block_inps, block_outs, layer_sq_grads, forward_batch_size,
+    *, square_gradients=False,
 ):
+    """Reduce per-sample FP64 errors; optionally square raw gradients per batch."""
     if forward_batch_size <= 0:
         raise ValueError("forward_batch_size must be positive")
 
@@ -340,14 +342,44 @@ def compute_moe_reconstruction_error(
         quant_block_outs = get_decoder_hidden_states(
             moe_block(batch_inps), batch_inps.shape
         )
+        weights = layer_sq_grads[start:end]
+        if square_gradients:
+            # Square the mapped CPU gradient in FP64 before moving this batch.
+            weights = weights.double().pow(2).to(batch_inps.device)
         errors = (
-            layer_sq_grads[start:end]
+            weights
             * (block_outs[start:end].double() - quant_block_outs.double()).pow(2)
         )
         sample_losses.append(errors.flatten(1).sum(dim=1))
+        del batch_inps, quant_block_outs, weights, errors
 
     # Read once per candidate, preserving the original sample-wise summation.
     return sum(torch.cat(sample_losses).tolist())
+
+
+@torch.inference_mode()
+def compute_mixtral_layer_reconstruction_errors(
+    moe_block, block_inps, block_outs, layer_gradients, bit_cfg, forward_batch_size,
+):
+    """Keep only the current Mixtral expert's candidate weights live."""
+    layer_quant_loss = defaultdict(dict)
+    for expert_id, expert in enumerate(moe_block.experts):
+        modules = [expert.w1, expert.w2, expert.w3]
+        original_weights = [module.weight.detach() for module in modules]
+        for bitwidth in bit_cfg:
+            try:
+                for module, weight in zip(modules, original_weights):
+                    module.weight.data = MCMoeRTNWeightQuantizer(
+                        weight, nbits=bitwidth
+                    ).quantize()
+                layer_quant_loss[expert_id][bitwidth] = compute_moe_reconstruction_error(
+                    moe_block, block_inps, block_outs, layer_gradients,
+                    forward_batch_size, square_gradients=True,
+                )
+            finally:
+                for module, weight in zip(modules, original_weights):
+                    module.weight.data = weight
+    return layer_quant_loss
 
 
 def compute_qwen2_moe_layer_reconstruction_errors(
@@ -595,6 +627,21 @@ def compute_faster_layer_re(model, dataloader, args):
             layers[i] = layer.to("cpu")
             gc.collect()
             torch.cuda.empty_cache()
+            continue
+
+        if model_type == ModelType.MIXTRAL:
+            try:
+                quant_loss[i] = compute_mixtral_layer_reconstruction_errors(
+                    moe_block, block_inps, block_outs,
+                    layer_output_grads[i].squeeze(1),
+                    list(map(int, args.wbits.split(","))), fwd_bsz,
+                )
+            finally:
+                del block_inps, block_outs, named_linears
+                layers[i] = layer.to("cpu")
+                gc.collect()
+                torch.cuda.empty_cache()
+            inps, outs = outs, inps
             continue
 
         # compute expert quantization errors

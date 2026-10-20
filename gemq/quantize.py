@@ -298,7 +298,7 @@ def finetune_routers(model, dataloader, args):
     optimizer = torch.optim.AdamW(router_params, lr=args.rft_lr, weight_decay=args.rft_wd)
     checkpoint_layers = 0
     if (
-        NAME_TO_MODEL[args.model_name] == ModelType.QWEN3MOE
+        NAME_TO_MODEL[args.model_name] in (ModelType.QWEN3MOE, ModelType.MIXTRAL)
         and torch.cuda.device_count() == 1
         and getattr(torch.cuda.get_device_properties(0), "is_integrated", False)
     ):
@@ -494,6 +494,10 @@ def quantize_weights_gptq(model, dataloader, args):
             elapse = time.time() - start
             if args.verbose:
                 print(f"| {name:<30} | {quantizers[name].nbits:<3} | {quantizers[name].groupsize:>4} | {elapse:>9.2f} |")
+
+            if model_type == ModelType.MIXTRAL:
+                # Calibration is complete; this module's Hessian is no longer used.
+                del quantizers[name], Q, W, scales, zeros
 
         if qwen2_quantizers is not None:
             packed_states = quantize_qwen2_expert_weights(
