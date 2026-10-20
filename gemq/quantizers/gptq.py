@@ -173,6 +173,19 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             count = i2 - i1
 
             W1 = W[:, i1:i2].clone()
+            if self.nbits in (1, 2, 3) and self.groupsize == self.blocksize:
+                # MC-MoE has no in-block compensation at low bits. With one
+                # group per block, all columns share fixed quantization params.
+                scales, zeros, max_int = self.find_params(W1)
+                scales_list.append(scales)
+                zeros_list.append(zeros)
+                Q1 = self.quantize_vector(W1, scales, zeros, max_int)
+                qr = (Q1 - zeros) * scales
+                Err1 = (W1 - qr) / Hinv.diagonal()[i1:i2].unsqueeze(0)
+                Q[:, i1:i2] = Q1
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                continue
+
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
