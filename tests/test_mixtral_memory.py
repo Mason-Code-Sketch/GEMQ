@@ -1,4 +1,5 @@
 import copy
+import pickle
 from types import SimpleNamespace
 import weakref
 
@@ -23,6 +24,59 @@ def config():
         attention_dropout=0.0, router_jitter_noise=0.0,
         use_cache=False, attn_implementation="eager",
     )
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.cuda)])
+@torch.inference_mode()
+def test_layer_re_restores_cpu_storage_with_exact_scores(tmp_path, monkeypatch, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    torch.manual_seed(29)
+    template = MixtralForCausalLM(config()).to(dtype=torch.float16).eval()
+    inputs = torch.randint(0, 128, (1, 4))
+    gradient_path = tmp_path / "grads.pt"
+    torch.save({i: torch.randn(2, 1, 4, 128, dtype=torch.float16)
+                for i in range(3)}, gradient_path)
+    if device == "cpu":
+        tensor_to, module_to = torch.Tensor.to, torch.nn.Module.to
+
+        def fake_tensor_to(tensor, *args, **kwargs):
+            if args and args[0] == "cuda":
+                args = ("cpu",) + args[1:]
+            if kwargs.get("device") == "cuda":
+                kwargs["device"] = "cpu"
+            return tensor_to(tensor, *args, **kwargs)
+
+        def fake_module_to(module, *args, **kwargs):
+            if args and args[0] == "cuda":
+                return module._apply(lambda tensor: tensor.clone())
+            return module_to(module, *args, **kwargs)
+
+        monkeypatch.setattr(torch.Tensor, "to", fake_tensor_to)
+        monkeypatch.setattr(torch.nn.Module, "to", fake_module_to)
+        monkeypatch.setattr(stats, "move_embed", lambda *_: None)
+
+    results = []
+    for cached in (False, True):
+        model = copy.deepcopy(template)
+        before = [{name: tensor for name, tensor in layer.state_dict().items()}
+                  for layer in model.model.layers]
+        path = tmp_path / f"scores-{cached}.pkl"
+        args = SimpleNamespace(
+            model_name=MODEL_NAME, layer_grads_path=str(gradient_path),
+            layer_re_path=str(path), forward_batch_size=1, wbits="1,2,3",
+            cache_mixtral_layer_grads=cached,
+        )
+        stats.compute_faster_layer_re(model, [(inputs, None)] * 2, args)
+        with path.open("rb") as stream:
+            results.append(pickle.load(stream))
+        for layer, original in zip(model.model.layers, before):
+            for name, tensor in layer.state_dict().items():
+                assert tensor.device.type == "cpu"
+                assert torch.equal(tensor, original[name])
+                if cached:
+                    assert tensor.data_ptr() == original[name].data_ptr()
+    assert results[0] == results[1]
 
 
 def legacy_scores(block, inputs, outputs, gradients, batch_size):

@@ -548,12 +548,17 @@ def compute_faster_layer_re(model, dataloader, args):
     # retrieve decoder blocks
     layers = get_blocks(model, model_name)
     validate_qwen2_moe_model(model, model_name)
+    preserve_cpu_storage = (
+        model_type == ModelType.MIXTRAL
+        and getattr(args, "cache_mixtral_layer_grads", False)
+    )
 
     # get input and kwargs to the first layer decoding layer
     inps = []
     layer_kwargs = {}
 
     move_embed(model, model_name, "cuda")
+    first_cpu_state = layers[0].state_dict() if preserve_cpu_storage else None
     layers[0] = layers[0].to("cuda")
     
     class Catcher(nn.Module):
@@ -578,7 +583,11 @@ def compute_faster_layer_re(model, dataloader, args):
     
     # for memory savings
     move_embed(model, model_name, "cpu")
-    layers[0] = layers[0].cpu()
+    if first_cpu_state is None:
+        layers[0] = layers[0].cpu()
+    else:
+        layers[0].load_state_dict(first_cpu_state, assign=True)
+        del first_cpu_state
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -587,6 +596,8 @@ def compute_faster_layer_re(model, dataloader, args):
     quant_loss = {}
     outs = torch.zeros_like(inps)
     for i in tqdm(range(len(layers)), desc="Computing rec errors"):
+        # Retain mapped CPU weights instead of accumulating anonymous CPU copies.
+        cpu_layer_state = layers[i].state_dict() if preserve_cpu_storage else None
         layer = layers[i].to("cuda")
 
         # NOTE: we skip computing stats for the first dense layer of deepseekv2
@@ -646,7 +657,11 @@ def compute_faster_layer_re(model, dataloader, args):
                 )
             finally:
                 del block_inps, block_outs, named_linears
-                layers[i] = layer.to("cpu")
+                if cpu_layer_state is None:
+                    layers[i] = layer.to("cpu")
+                else:
+                    layer.load_state_dict(cpu_layer_state, assign=True)
+                    del cpu_layer_state
                 gc.collect()
                 torch.cuda.empty_cache()
             inps, outs = outs, inps
