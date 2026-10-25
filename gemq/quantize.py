@@ -198,6 +198,15 @@ def pack_quantized_model(model, quant_modules, qwen2_packed_states, args):
 
 def validate_checkpoint_paths(args):
     """Validate the optional fake checkpoint saved before real-weight packing."""
+    if getattr(args, "final_packed_eval_only", False):
+        if not (args.real_quant and args.eval_real_quant and args.save_path):
+            raise ValueError(
+                "--final_packed_eval_only requires --real_quant, --eval_real_quant and --save_path."
+            )
+        if args.eval_downstream:
+            raise ValueError(
+                "--final_packed_eval_only requires downstream evaluation from the saved packed checkpoint."
+            )
     if args.eval_real_quant and not args.real_quant:
         raise ValueError("--eval_real_quant requires --real_quant.")
 
@@ -210,6 +219,11 @@ def validate_checkpoint_paths(args):
         raise ValueError("--fake_save_path requires --save_path.")
     if os.path.abspath(args.fake_save_path) == os.path.abspath(args.save_path):
         raise ValueError("--fake_save_path must differ from --save_path.")
+
+
+def evaluate_unpacked_perplexity(model, tokenizer, datasets, model_name, args, **kwargs):
+    if not getattr(args, "final_packed_eval_only", False):
+        return evaluate_perplexity(model, tokenizer, datasets, model_name, **kwargs)
 
 
 def capture_router_finetune_state(model, router_params):
@@ -714,6 +728,10 @@ def parse_args():
         help="Evaluate HQQ-packed weights after real quantization and before saving"
     )
     parser.add_argument(
+        "--final_packed_eval_only", action="store_true",
+        help="Skip unpacked PPL and evaluate only the final HQQ-packed model",
+    )
+    parser.add_argument(
         "--save_path", type=str, default="",
         help="Save quantized checkpoint under this path"
     )
@@ -786,11 +804,12 @@ if __name__ == "__main__":
 
             with resource_ledger.component("evaluation_gptq"):
                 print("Evaluating quantized model before fine-tuning ...")
-                evaluate_perplexity(
+                evaluate_unpacked_perplexity(
                     model,
                     tokenizer,
                     ["wikitext2", "c4"],
                     args.model_name,
+                    args,
                     offload=False,
                     dataset_root=args.dataset_root,
                 )
@@ -808,11 +827,12 @@ if __name__ == "__main__":
                     model = dispatch_model_to_all_devices(model)
 
             with resource_ledger.component("evaluation_router_ft"):
-                evaluate_perplexity(
+                evaluate_unpacked_perplexity(
                     model,
                     tokenizer,
                     ["wikitext2", "c4"],
                     args.model_name,
+                    args,
                     offload=False,
                     dataset_root=args.dataset_root,
                 )
@@ -831,11 +851,12 @@ if __name__ == "__main__":
                         print("Downstream evaluation failed. Skipping ...")
         else:
             with resource_ledger.component("evaluation"):
-                evaluate_perplexity(
+                evaluate_unpacked_perplexity(
                     model,
                     tokenizer,
                     ["wikitext2", "c4"],
                     args.model_name,
+                    args,
                     offload=True,
                     dataset_root=args.dataset_root,
                 )
