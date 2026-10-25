@@ -48,9 +48,10 @@ def legacy_scores(block, inputs, outputs, gradients, batch_size):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("cache_gradients", [False, True])
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.cuda)])
 @torch.inference_mode()
-def test_streamed_candidates_and_mapped_gradients_match_legacy(tmp_path, monkeypatch, dtype, batch_size, device):
+def test_streamed_candidates_and_mapped_gradients_match_legacy(tmp_path, monkeypatch, dtype, batch_size, cache_gradients, device):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     torch.manual_seed(13)
@@ -81,19 +82,38 @@ def test_streamed_candidates_and_mapped_gradients_match_legacy(tmp_path, monkeyp
     monkeypatch.setattr(torch.Tensor, "double", tracked_double)
     actual = stats.compute_mixtral_layer_reconstruction_errors(
         block, inputs, outputs, gradients, [1, 2, 3], batch_size,
+        cache_squared_gradients=cache_gradients,
     )
     assert actual == expected
     assert max(live_counts) == 1
     assert all(reference() is None for reference in references)
-    assert gradient_sizes and max(gradient_sizes) <= batch_size * inputs[0].numel()
+    if cache_gradients:
+        assert not gradient_sizes
+    else:
+        assert gradient_sizes and max(gradient_sizes) <= batch_size * inputs[0].numel()
     for name, parameter in block.named_parameters():
         assert torch.equal(parameter, originals[name])
         assert parameter.data_ptr() == pointers[name]
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.cuda)])
+def test_cached_half_gradient_squares_are_exact_and_do_not_alias(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    values = torch.arange(65536, dtype=torch.int32).to(torch.int16).view(torch.float16)
+    values = values[torch.isfinite(values)]
+    original = values.clone()
+    expected = values.double().pow(2).to(device)
+    actual = values.to(device=device).to(dtype=torch.float64, copy=True)
+    actual.square_()
+    assert torch.equal(actual, expected)
+    assert torch.equal(values, original)
+
+
 @pytest.mark.parametrize("failure", ["quantize", "score"])
+@pytest.mark.parametrize("cache_gradients", [False, True])
 @torch.inference_mode()
-def test_candidate_failure_restores_original_weights(monkeypatch, failure):
+def test_candidate_failure_restores_original_weights(monkeypatch, failure, cache_gradients):
     block = MixtralSparseMoeBlock(config()).eval()
     originals = {name: parameter.clone() for name, parameter in block.named_parameters()}
     inputs = torch.randn(1, 3, 128)
@@ -113,6 +133,7 @@ def test_candidate_failure_restores_original_weights(monkeypatch, failure):
     with pytest.raises(RuntimeError, match="test failure"):
         stats.compute_mixtral_layer_reconstruction_errors(
             block, inputs, inputs, inputs, [1, 2, 3], 1,
+            cache_squared_gradients=cache_gradients,
         )
     for name, parameter in block.named_parameters():
         assert torch.equal(parameter, originals[name])

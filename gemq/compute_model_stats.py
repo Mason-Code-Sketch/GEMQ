@@ -360,8 +360,15 @@ def compute_moe_reconstruction_error(
 @torch.inference_mode()
 def compute_mixtral_layer_reconstruction_errors(
     moe_block, block_inps, block_outs, layer_gradients, bit_cfg, forward_batch_size,
+    *, cache_squared_gradients=False,
 ):
     """Keep only the current Mixtral expert's candidate weights live."""
+    score_gradients = layer_gradients
+    if cache_squared_gradients:
+        # Half-precision values and their squares are represented exactly in FP64.
+        score_gradients = layer_gradients.to(device=block_inps.device)
+        score_gradients = score_gradients.to(dtype=torch.float64, copy=True)
+        score_gradients.square_()
     layer_quant_loss = defaultdict(dict)
     for expert_id, expert in enumerate(moe_block.experts):
         modules = [expert.w1, expert.w2, expert.w3]
@@ -373,8 +380,8 @@ def compute_mixtral_layer_reconstruction_errors(
                         weight, nbits=bitwidth
                     ).quantize()
                 layer_quant_loss[expert_id][bitwidth] = compute_moe_reconstruction_error(
-                    moe_block, block_inps, block_outs, layer_gradients,
-                    forward_batch_size, square_gradients=True,
+                    moe_block, block_inps, block_outs, score_gradients,
+                    forward_batch_size, square_gradients=not cache_squared_gradients,
                 )
             finally:
                 for module, weight in zip(modules, original_weights):
@@ -635,6 +642,7 @@ def compute_faster_layer_re(model, dataloader, args):
                     moe_block, block_inps, block_outs,
                     layer_output_grads[i].squeeze(1),
                     list(map(int, args.wbits.split(","))), fwd_bsz,
+                    cache_squared_gradients=getattr(args, "cache_mixtral_layer_grads", False),
                 )
             finally:
                 del block_inps, block_outs, named_linears
@@ -787,6 +795,10 @@ def parse_args():
     parser.add_argument(
         "--layer_grads_gpu_memory_gib", type=int, default=None,
         help="Optional fixed GPU weight budget in GiB for LayerGrads auto placement",
+    )
+    parser.add_argument(
+        "--cache_mixtral_layer_grads", action="store_true",
+        help="Cache only the current Mixtral layer's squared FP64 gradients on the scoring device",
     )
 
     # quantization args
