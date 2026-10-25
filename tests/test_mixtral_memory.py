@@ -38,14 +38,14 @@ def test_layer_re_restores_cpu_storage_with_exact_scores(tmp_path, monkeypatch, 
     torch.save({i: torch.randn(2, 1, 4, 128, dtype=torch.float16)
                 for i in range(3)}, gradient_path)
     if device == "cpu":
-        tensor_to, module_to = torch.Tensor.to, torch.nn.Module.to
+        base_tensor_to, module_to = torch.Tensor.to, torch.nn.Module.to
 
         def fake_tensor_to(tensor, *args, **kwargs):
             if args and args[0] == "cuda":
                 args = ("cpu",) + args[1:]
             if kwargs.get("device") == "cuda":
                 kwargs["device"] = "cpu"
-            return tensor_to(tensor, *args, **kwargs)
+            return base_tensor_to(tensor, *args, **kwargs)
 
         def fake_module_to(module, *args, **kwargs):
             if args and args[0] == "cuda":
@@ -56,11 +56,32 @@ def test_layer_re_restores_cpu_storage_with_exact_scores(tmp_path, monkeypatch, 
         monkeypatch.setattr(torch.nn.Module, "to", fake_module_to)
         monkeypatch.setattr(stats, "move_embed", lambda *_: None)
 
+    protected = set()
+    tensor_to, load = torch.Tensor.to, torch.load
+
+    def checked_to(tensor, *args, **kwargs):
+        target = kwargs.get("device", args[0] if args else None)
+        if tensor.device.type == "cpu" and str(target).startswith("cuda"):
+            assert tensor.untyped_storage().data_ptr() not in protected
+        return tensor_to(tensor, *args, **kwargs)
+
+    def tracked_load(*args, **kwargs):
+        values = load(*args, **kwargs)
+        if protected:
+            protected.update(tensor.untyped_storage().data_ptr() for tensor in values.values())
+        return values
+
+    monkeypatch.setattr(torch.Tensor, "to", checked_to)
+    monkeypatch.setattr(torch, "load", tracked_load)
     results = []
     for cached in (False, True):
         model = copy.deepcopy(template)
         before = [{name: tensor for name, tensor in layer.state_dict().items()}
                   for layer in model.model.layers]
+        protected.clear()
+        if cached:
+            protected.update(tensor.untyped_storage().data_ptr()
+                             for state in before for tensor in state.values())
         path = tmp_path / f"scores-{cached}.pkl"
         args = SimpleNamespace(
             model_name=MODEL_NAME, layer_grads_path=str(gradient_path),

@@ -366,7 +366,8 @@ def compute_mixtral_layer_reconstruction_errors(
     score_gradients = layer_gradients
     if cache_squared_gradients:
         # Half-precision values and their squares are represented exactly in FP64.
-        score_gradients = layer_gradients.to(device=block_inps.device)
+        # Stage a private tensor so CUDA cannot dirty the persistent file mapping.
+        score_gradients = layer_gradients.clone().to(device=block_inps.device)
         score_gradients = score_gradients.to(dtype=torch.float64, copy=True)
         score_gradients.square_()
     layer_quant_loss = defaultdict(dict)
@@ -559,6 +560,10 @@ def compute_faster_layer_re(model, dataloader, args):
 
     move_embed(model, model_name, "cuda")
     first_cpu_state = layers[0].state_dict() if preserve_cpu_storage else None
+    if first_cpu_state is not None:
+        layers[0].load_state_dict(
+            {name: tensor.clone() for name, tensor in first_cpu_state.items()}, assign=True
+        )
     layers[0] = layers[0].to("cuda")
     
     class Catcher(nn.Module):
@@ -598,6 +603,10 @@ def compute_faster_layer_re(model, dataloader, args):
     for i in tqdm(range(len(layers)), desc="Computing rec errors"):
         # Retain mapped CPU weights instead of accumulating anonymous CPU copies.
         cpu_layer_state = layers[i].state_dict() if preserve_cpu_storage else None
+        if cpu_layer_state is not None:
+            layers[i].load_state_dict(
+                {name: tensor.clone() for name, tensor in cpu_layer_state.items()}, assign=True
+            )
         layer = layers[i].to("cuda")
 
         # NOTE: we skip computing stats for the first dense layer of deepseekv2
