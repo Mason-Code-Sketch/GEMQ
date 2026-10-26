@@ -220,6 +220,7 @@ def run_lm_eval(
     wrapped = HFLM(
         pretrained=model, tokenizer=tokenizer, backend="causal",
         batch_size=batch_size, max_length=max_length, max_batch_size=max_batch_size,
+        add_bos_token=False,
     )
     config = getattr(model, "config", None)
     disable_cache = getattr(config, "model_type", None) == "deepseek_v2"

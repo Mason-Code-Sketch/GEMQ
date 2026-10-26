@@ -201,6 +201,7 @@ def test_harness_receives_batch_limit_seeds_and_zero_shot(monkeypatch):
     assert wrapper.call_args.kwargs["pretrained"] == "model"
     assert wrapper.call_args.kwargs["batch_size"] == "auto"
     assert wrapper.call_args.kwargs["max_batch_size"] == 4
+    assert wrapper.call_args.kwargs["add_bos_token"] is False
     options = evaluate.call_args.kwargs
     assert options["num_fewshot"] == 0
     assert options["limit"] == 4
@@ -256,6 +257,7 @@ def test_formal_run_saves_results_and_logs_without_changing_model(checkpoint, mo
     entry.main(["--model_path", str(checkpoint)])
     saved = json.loads((checkpoint / "zeroshot.json").read_text())
     assert saved["experiment"]["num_fewshot"] == 0
+    assert saved["experiment"]["add_bos_token"] is False
     assert saved["experiment"]["model_path"] == str(checkpoint)
     assert "seven_task_average" in saved["summary"]
     assert "Avg (7 tasks)" in (checkpoint / "zeroshot.log").read_text()

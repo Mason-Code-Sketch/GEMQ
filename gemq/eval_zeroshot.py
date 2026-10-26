@@ -257,7 +257,7 @@ def main(argv=None):
                 "layer_devices": args.layer_devices,
                 "backend": args.backend,
                 "tasks": args.tasks, "include_gsm8k": args.include_gsm8k,
-                "num_fewshot": 0, "apply_chat_template": False,
+                "num_fewshot": 0, "apply_chat_template": False, "add_bos_token": False,
                 "batch_size": args.batch_size, "max_length": args.max_length,
                 "max_batch_size": args.max_batch_size,
                 "seed": args.seed, "wall_seconds": elapsed,
