@@ -133,7 +133,7 @@ def uses_remote_code(model):
 
 def deepseek_mscale_correction(config):
     """
-    The YaRN mscale HF's built-in DeepSeek-V2 omits from its attention scale. Pure; 1.0
+    The YaRN factor required by DeepSeek-V2's attention scale. Pure; 1.0
     when the config has no YaRN.
 
     Official modeling_deepseek.py:
@@ -157,8 +157,8 @@ def align_deepseek_softmax_scale(model, verbose=True):
     Apply `deepseek_mscale_correction` to every attention module. Returns the factor
     applied, 1.0 if nothing changed.
 
-    No-op on the official implementation, and on transformers versions that already fix
-    this (PR #47435, merged 2026-07-20, not in any release as of v5.14.1): a module whose
+    No-op on the official implementation and on Transformers versions that already
+    include the YaRN correction: a module whose
     `scaling` already differs from the plain qk_head_dim ** -0.5 baseline is left alone,
     so upgrading transformers cannot silently double-apply the factor.
     """
