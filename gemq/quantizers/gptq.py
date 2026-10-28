@@ -3,6 +3,8 @@ import math
 import torch
 import torch.nn as nn
 
+from gemq.quantizers.hessian import inverse_hessian_factor
+
 
 class MCMoeGPTQWeightQuantizer(nn.Module):
     """Aligned GPTQ retaining native MC-MoE parameter arithmetic precision."""
@@ -13,10 +15,17 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
     ):
         super().__init__()
 
+        if actorder or static_groups:
+            raise ValueError("GEMQ does not implement actorder or static_groups")
+        if blocksize < 1 or groupsize == 0 or groupsize < -1:
+            raise ValueError("GPTQ blocksize must be positive and groupsize must be positive or -1")
+        if not isinstance(mse, bool):
+            raise ValueError("GPTQ mse must be boolean")
         self.name = name
         self.nbits = nbits
         self.groupsize = groupsize
-        assert self.groupsize > 0, "Current implementation only supports groupsize > 0."
+        if self.groupsize <= 0:
+            raise ValueError("MC-MoE parameter precision requires groupsize > 0")
 
         self.blocksize = blocksize
         self.percdamp = percdamp
@@ -31,7 +40,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         self.H = torch.zeros((self.columns, self.columns), device=x.device)
         self.nsamples = 0
 
-        assert self.columns % self.groupsize == 0, f"Groupsize ({self.groupsize}) must divide feature dimension ({self.columns})."
+        if self.groupsize <= 0 or self.columns % self.groupsize:
+            raise ValueError(f"Groupsize ({self.groupsize}) must divide feature dimension ({self.columns})")
 
     def add_batch(self, inp):
         """
@@ -142,18 +152,10 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         H = self.H          # (n_dim, n_dim)
 
 
-        assert not self.static_groups
-        if self.static_groups:
-            pass
-
-        assert not self.actorder
-        if self.actorder:
-            pass
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        from gemq.quantizers.hessian import inverse_hessian_factor
         Hinv = inverse_hessian_factor(H, self.percdamp)
 
         # initialize quantization params (assuming groupsize < 0)
@@ -176,14 +178,11 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
                 d = Hinv1[i, i]
 
                 if self.groupsize > 0:
-                    if not self.static_groups:
-                        # update quantization params for a new group
-                        if (i1 + i) % self.groupsize == 0:
-                            scales, zeros, max_int = self.find_params(W[:, (i1 + i):(i1 + i + self.groupsize)])
-                            scales_list.append(scales)
-                            zeros_list.append(zeros)
-                    else:
-                        pass
+                    # update quantization params for a new group
+                    if (i1 + i) % self.groupsize == 0:
+                        scales, zeros, max_int = self.find_params(W[:, (i1 + i):(i1 + i + self.groupsize)])
+                        scales_list.append(scales)
+                        zeros_list.append(zeros)
 
                 q = self.quantize_vector(w.unsqueeze(1), scales, zeros, max_int)
                 qr = (q - zeros) * scales  # dequantize
@@ -203,9 +202,6 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             Losses[:, i1:i2] = Losses1 / 2
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-
-        if self.actorder:
-            pass
 
         Q = Q.to(self.W.dtype)
         scales = torch.cat(scales_list, dim=1)  # (N_filter, N_group)
@@ -234,6 +230,12 @@ class GPTQWeightQuantizer(nn.Module):
     ):
         super().__init__()
 
+        if actorder or static_groups:
+            raise ValueError("GEMQ does not implement actorder or static_groups")
+        if blocksize < 1 or groupsize == 0 or groupsize < -1:
+            raise ValueError("GPTQ blocksize must be positive and groupsize must be positive or -1")
+        if not isinstance(mse, bool):
+            raise ValueError("GPTQ mse must be boolean")
         self.name = name
         self.nbits = nbits
         self.groupsize = groupsize
@@ -358,18 +360,10 @@ class GPTQWeightQuantizer(nn.Module):
         H = self.H          # (n_dim, n_dim)
 
         
-        assert not self.static_groups
-        if self.static_groups:
-            pass
-
-        assert not self.actorder
-        if self.actorder:
-            pass
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        from gemq.quantizers.hessian import inverse_hessian_factor
         Hinv = inverse_hessian_factor(H, self.percdamp)
 
         # initialize quantization params (assuming groupsize < 0)
@@ -392,14 +386,11 @@ class GPTQWeightQuantizer(nn.Module):
                 d = Hinv1[i, i]
 
                 if self.groupsize > 0:
-                    if not self.static_groups:
-                        # update quantization params for a new group
-                        if (i1 + i) % self.groupsize == 0:
-                            scales, zeros, max_int = self.find_params(W[:, (i1 + i):(i1 + i + self.groupsize)])
-                            scales_list.append(scales)
-                            zeros_list.append(zeros)
-                    else:
-                        pass
+                    # update quantization params for a new group
+                    if (i1 + i) % self.groupsize == 0:
+                        scales, zeros, max_int = self.find_params(W[:, (i1 + i):(i1 + i + self.groupsize)])
+                        scales_list.append(scales)
+                        zeros_list.append(zeros)
 
                 q = self.quantize_vector(w.unsqueeze(1), scales, zeros, max_int)
                 qr = (q - zeros) * scales  # dequantize
@@ -417,9 +408,6 @@ class GPTQWeightQuantizer(nn.Module):
             Losses[:, i1:i2] = Losses1 / 2
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-
-        if self.actorder:
-            pass
 
         if self.groupsize != -1:
             scales = torch.cat(scales_list, dim=1).to(self.W.dtype)  # (N_filter, N_group)

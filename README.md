@@ -166,15 +166,14 @@ python -m gemq.eval_zeroshot --model_path "$CHECKPOINT_DIR" --batch_size auto --
 The default suite is PIQA, ARC-Easy, ARC-Challenge, HellaSwag, WinoGrande, MathQA,
 and MMLU. It uses LM Evaluation Harness 0.4.13, zero shots, the native task prompts,
 and no chat template. Scores use `acc_norm` when available, otherwise `acc`.
-`--backend auto` (the default) caches decoded packed weights for Qwen3 FP16
-models on CUDA with the supported ModuleList expert layout, retaining HQQ's
-original floating-point matrix multiplication. This avoids repeated decoding
-and uses additional memory for decoded weights. `--backend triton` explicitly
-requests GEMQ's fused MoE kernels and GemLite attention linears. Both accelerated
-paths compare logits and mean token log-probabilities with the PyTorch backend
-on single-sequence and batched inputs before evaluating tasks; a failed check
-stops evaluation. Other models retain the PyTorch backend. Use `--backend pytorch`
-to explicitly evaluate with HQQ's original forward.
+`--backend auto` (the default) selects resident `grouped_cached` evaluation for
+FP16/BF16 DeepSeek-V2-Lite, Qwen1.5-MoE, Qwen3-MoE and Mixtral checkpoints on CUDA.
+Weights are decoded once and expert projections use `torch._grouped_mm`.
+`--backend cached` retains the earlier cached Qwen3 matrix multiplication path;
+`--backend triton` explicitly requests GEMQ's fused kernels. Accelerated paths
+check logits and token log-probabilities before scoring, and stop on failure.
+Other model families retain the PyTorch backend. Use `--backend pytorch` to
+explicitly evaluate with HQQ's original forward.
 The selected backend is recorded in the result JSON. This does not requantize
 weights or modify the checkpoint on disk.
 MMLU counts once in the equally weighted seven-task average. `--include_gsm8k`
@@ -241,5 +240,5 @@ python -m gemq.eval_zeroshot --model_path /absolute/path/to/checkpoint \
 ```
 
 Use `--layer-devices cuda:0 cuda:1` (or more visible devices) when the resident
-decoded model does not fit on one GPU. Existing FP16 `cached`/`auto` behavior and
-Triton settings remain available; checkpoint files are unchanged.
+decoded model does not fit on one GPU. Explicit `cached` and Triton settings
+remain available; checkpoint files are unchanged.

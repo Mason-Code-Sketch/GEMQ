@@ -33,11 +33,20 @@ from gemq.utils.activation_checkpoint import checkpoint_attention
 logging.set_verbosity_error()
 
 
-def evaluate_saved_downstream(args):
+def configure_quantization_model(model, args):
+    """Apply requested sequence length and KV-cache policy to the loaded model."""
+    model.seqlen = args.seqlen
+    if args.disable_cache:
+        model.config.use_cache = False
+    return model
+
+
+def evaluate_saved_downstream(args, *, model_dtype=None):
     """Run seven tasks from the final checkpoint using resident grouped experts."""
     from gemq.eval_zeroshot import main as evaluate
     return evaluate([
-        "--model_path", str(args.save_path), "--model_dtype", args.save_dtype,
+        "--model_path", str(args.save_path),
+        "--model_dtype", model_dtype or args.model_dtype,
         "--backend", "grouped_cached", "--tasks", *args.downstream_tasks.split(","),
         "--batch_size", str(args.lm_eval_batchsize), "--seed", str(args.seed),
     ])
@@ -217,6 +226,15 @@ def validate_checkpoint_paths(args):
             raise ValueError(
                 "--final_packed_eval_only requires downstream evaluation from the saved packed checkpoint."
             )
+    if (
+        args.real_quant
+        and getattr(args, "save_dtype", "float16") != "float16"
+        and not args.fake_save_path
+    ):
+        raise ValueError(
+            "save_dtype applies to floating-point checkpoints; packed models retain native precision. "
+            "Use model_dtype for packed-model compute precision"
+        )
     if args.eval_real_quant and not args.real_quant:
         raise ValueError("--eval_real_quant requires --real_quant.")
 
@@ -677,11 +695,11 @@ def parse_args():
     )
     parser.add_argument(
         "--actorder", action="store_true",
-        help="Whether to apply the activation order GPTQ heuristic (never used)"
+        help="Unsupported by GEMQ; an explicit request is rejected"
     )
     parser.add_argument(
         "--static_groups", action="store_true",
-        help="Whether to use static groups; recommended when using `--actorder` for more efficient inference. (never used)"
+        help="Unsupported by GEMQ; an explicit request is rejected"
     )
     parser.add_argument(
         "--reproduce_mcmoe", action="store_true",
@@ -751,14 +769,21 @@ def parse_args():
     )
     parser.add_argument(
         "--save_dtype", type=str, default="float16", choices=["float16", "bfloat16"],
-        help="Data type to save the quantized model"
+        help="Data type for floating-point checkpoints; packed checkpoints retain native precision"
     )
     parser.add_argument(
         "--resource_output", type=str, default="",
         help="Optional JSON path for wall-time and GPU-memory accounting",
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.actorder or args.static_groups:
+        parser.error("actorder and static_groups are not implemented by GEMQ")
+    if args.seqlen < 2 or args.nsamples < 1 or args.blocksize < 1:
+        parser.error("seqlen, nsamples and blocksize must be positive, with seqlen >= 2")
+    if args.groupsize == 0 or args.groupsize < -1:
+        parser.error("groupsize must be positive or -1")
+    return args
 
 
 if __name__ == "__main__":
@@ -791,7 +816,7 @@ if __name__ == "__main__":
                 trust_remote_code=args.trust_remote_code,
             )
             align_deepseek_softmax_scale(model)
-            model.seqlen = 2048
+            configure_quantization_model(model, args)
             model.eval()
             validate_qwen2_moe_model(model, args.model_name)
 
@@ -916,9 +941,10 @@ if __name__ == "__main__":
 
         if args.eval_downstream:
             # Reload exactly the saved final model, including its trained routers.
+            evaluation_dtype = str(next(model.parameters()).dtype).removeprefix("torch.")
             quant_modules.clear()
             qwen2_packed_states.clear()
             del model
             gc.collect()
             torch.cuda.empty_cache()
-            evaluate_saved_downstream(args)
+            evaluate_saved_downstream(args, model_dtype=evaluation_dtype)
