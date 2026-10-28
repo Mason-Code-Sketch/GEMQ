@@ -14,10 +14,12 @@ def parse(extra):
         return quantize.parse_args()
 
 
-def test_mse_and_sequence_cache_settings_reach_execution():
+@pytest.mark.parametrize("mcmoe", [False, True])
+def test_mse_and_sequence_cache_settings_reach_execution(mcmoe):
     for mse in (False, True):
         args = parse(["--mse" if mse else "--no-mse", "--seqlen", "64", "--disable_cache",
-                      "--groupsize", "8", "--blocksize", "4"])
+                      "--groupsize", "8", "--blocksize", "4"]
+                     + (["--reproduce_mcmoe"] if mcmoe else []))
         model = SimpleNamespace(config=SimpleNamespace(use_cache=True))
         quantize.configure_quantization_model(model, args)
         assert model.seqlen == 64

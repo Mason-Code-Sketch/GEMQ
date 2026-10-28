@@ -151,8 +151,6 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         W = self.W.float()  # (n_fltd, n_dim)
         H = self.H          # (n_dim, n_dim)
 
-
-
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
@@ -358,9 +356,6 @@ class GPTQWeightQuantizer(nn.Module):
         
         W = self.W.float()  # (n_fltd, n_dim)
         H = self.H          # (n_dim, n_dim)
-
-        
-
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 

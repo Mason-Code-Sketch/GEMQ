@@ -448,26 +448,7 @@ def quantize_weights_gptq(model, dataloader, args):
             if wbits >= 16:
                 continue
 
-            # NOTE: adjust groupsize to fit the hidden size
-            hidden_size = m.weight.shape[1]
-            if hidden_size % args.groupsize == 0:
-                groupsize = args.groupsize
-            else:
-                assert hidden_size % 64 == 0, "Currently only supports groupsize=64 as fallback."
-                groupsize = 64
-                if args.verbose:
-                    print(f"Forcing groupsize from {args.groupsize} to 64 for module: {name}")
-
-            if args.reproduce_mcmoe:
-                quantizers[name] = MCMoeGPTQWeightQuantizer(
-                    m.weight.data, name, wbits, args.blocksize, args.percdamp,
-                    groupsize, args.actorder, args.static_groups, args.mse
-                )
-            else:
-                quantizers[name] = GPTQWeightQuantizer(
-                    m.weight.data, name, wbits, args.blocksize, args.percdamp,
-                    groupsize, args.actorder, args.static_groups, args.mse
-                )
+            quantizers[name] = make_gptq_quantizer(m.weight.data, name, wbits, args)
             
             # collect quantized modules for real quantization saving
             quant_modules[f"{i}.{name}"] = m
