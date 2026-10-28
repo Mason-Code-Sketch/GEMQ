@@ -861,7 +861,7 @@ def parse_args():
 
 def main(args) -> None:
     target = args.layer_grads_path if args.mode == "layer_grads" else args.layer_re_path
-    resource_output = args.resource_output or (target + ".resource.json" if target else f"results/resource-records/{args.model_name}/{args.mode}.json")
+    resource_output = args.resource_output or (osp.splitext(target)[0] + ".resource.json" if target else f"results/resource-records/{args.model_name}/{args.mode}.json")
     resource_ledger = ResourceLedger(resource_output)
     with resource_ledger.command():
         with resource_ledger.component("load_model_and_tokenizer"):

@@ -53,3 +53,12 @@ layer_re_path="cache/${model_name}/LayerRE_${dataset}-N${nsamples}-L${seqlen}-Se
     --layer_grads_path ${layer_grads_path} \
     --layer_re_path ${layer_re_path} \
     --forward_batch_size 1
+
+"$python" - "${layer_re_path%.pkl}.resource.json" "${layer_grads_path%.pt}.resource.json" <<'PY'
+import sys
+
+from gemq.resource_ledger import merge_ledgers
+
+output_path, grads_path = sys.argv[1:]
+merge_ledgers(output_path, [grads_path, output_path])
+PY

@@ -206,6 +206,7 @@ def test_qwen3_scripts_use_dgx_paths_and_protocol(tmp_path):
         subprocess.run(["bash", "-n", str(script)], check=True)
         subprocess.run(["bash", str(script)], cwd=tmp_path, env=env, check=True)
     calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    calls = [call for call in calls if call["args"][0] == "-m"]
     assert len(calls) == 4
     assert all(call["cwd"] == str(repo) for call in calls)
     for call in (calls[0], calls[1], calls[3]):

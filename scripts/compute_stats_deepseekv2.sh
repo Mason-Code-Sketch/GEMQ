@@ -34,7 +34,7 @@ python -m gemq.compute_model_stats \
     --nsamples ${nsamples} \
     --seqlen ${seqlen} \
     --layer_grads_path ${layer_grads_path} \
-    --resource_output ${resource_output}
+    --resource_output "${layer_grads_path%.pt}.resource.json"
 
 
 # =============================================================================
@@ -54,3 +54,12 @@ python -m gemq.compute_model_stats \
     --layer_re_path ${layer_re_path} \
     --forward_batch_size 32 \
     --resource_output ${resource_output}
+
+python - "${layer_re_path%.pkl}.resource.json" "${layer_grads_path%.pt}.resource.json" <<'PY'
+import sys
+
+from gemq.resource_ledger import merge_ledgers
+
+output_path, grads_path = sys.argv[1:]
+merge_ledgers(output_path, [grads_path, output_path])
+PY

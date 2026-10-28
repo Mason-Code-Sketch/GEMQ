@@ -136,6 +136,7 @@ class Qwen15AdaptationTest(unittest.TestCase):
         model = _LoadedModel()
         args = SimpleNamespace(
             resource_output="",
+            layer_grads_gpu_memory_gib=None,
             layer_grads_path="",
             model="unused",
             use_fast=False,
