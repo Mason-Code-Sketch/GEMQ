@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 # Settings
 model_name="mistralai/Mixtral-8x7B-v0.1"
 bits_per_expert=2.0  # target average bits-per-expert

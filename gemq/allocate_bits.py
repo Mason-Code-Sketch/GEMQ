@@ -146,7 +146,7 @@ def allocation_output_path(args):
         bc_str = ",".join(map(str, bit_cands))
         calib_str, model_str = auto_parse_filename(args.layer_re_path)
         const_str = "" if args.extra_constr == "none" else f"_{args.extra_constr}"
-        save_path = f"configs/{args.model_name}/GEMQ/{calib_str}_E{bpe:.1f}_B{bc_str}{const_str}{model_str}.pkl"
+        save_path = f"configs/{args.model_name}/GEMQ/{calib_str}_E{float(bpe)}_B{bc_str}{const_str}{model_str}.pkl"
     
     return save_path
 

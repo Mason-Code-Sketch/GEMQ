@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 # ===============================
 #  Model settings
 # ===============================
@@ -69,9 +72,8 @@ if [[ "${finetune_routers}" == "true" ]]; then
     quant_args+=(--finetune_routers --rft_epochs "$rft_epochs" --rft_lr "$rft_lr")
 fi
 
-eval_args=()
 if [[ "${eval_downstream}" == "true" ]]; then
-    eval_args=(--eval_downstream --downstream_tasks "$downstream_tasks")
+    quant_args+=(--eval_downstream --downstream_tasks "$downstream_tasks")
 fi
 
 fname="${bit_cfg##*/}"
@@ -89,6 +91,13 @@ else
     save_path="None"
     io_args=()
 fi
+
+if [[ "${save_model}" == "true" ]]; then
+    resource_output="${save_path}/resource_breakdown.json"
+else
+    resource_output="results/resource-records/${model_name}/${qtype}/${prefix}_A4-G16-D4-E${bpe}${rft_tag}.json"
+fi
+io_args+=(--resource_output "$resource_output")
 
 
 # ===============================
@@ -113,5 +122,17 @@ python -m gemq.quantize \
     "${model_args[@]}" \
     "${data_args[@]}" \
     "${quant_args[@]}" \
-    "${eval_args[@]}" \
     "${io_args[@]}"
+
+if [[ "${mixed_prec}" == "true" ]]; then
+    stats_resource="cache/${model_name}/LayerRE_c4-N128-L2048-Seed0_B1,2,3_faster.resource.json"
+    allocation_resource="${bit_cfg%.pkl}.resource.json"
+    python - "${resource_output}" "${stats_resource}" "${allocation_resource}" <<'PY'
+import sys
+
+from gemq.resource_ledger import merge_ledgers
+
+output_path, *upstream_paths = sys.argv[1:]
+merge_ledgers(output_path, [output_path, *upstream_paths])
+PY
+fi

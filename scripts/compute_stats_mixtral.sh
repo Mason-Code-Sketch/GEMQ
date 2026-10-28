@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
 # Model settings
 model_name="mistralai/Mixtral-8x7B-v0.1"
 model="mistralai/Mixtral-8x7B-v0.1"
@@ -46,3 +49,12 @@ python -m gemq.compute_model_stats \
     --layer_grads_path ${layer_grads_path} \
     --layer_re_path ${layer_re_path} \
     --forward_batch_size 1
+
+python - "${layer_re_path%.pkl}.resource.json" "${layer_grads_path%.pt}.resource.json" <<'PY'
+import sys
+
+from gemq.resource_ledger import merge_ledgers
+
+output_path, grads_path = sys.argv[1:]
+merge_ledgers(output_path, [grads_path, output_path])
+PY

@@ -201,3 +201,10 @@ deduplicates run IDs, including previously merged inputs, and marks missing or
 failed sources incomplete. Keep evaluation records separate when comparing the
 five core phases with Table 4; compare hardware and protocol settings explicitly.
 Historical resource values are not backfilled.
+
+Statistics resource sidecars use the source filename stem: `LayerGrads_*.resource.json`
+and `LayerRE_*.resource.json`. The four model scripts keep the two runs separate,
+then combine their records with allocation and quantization in the saved model
+directory's `resource_breakdown.json`. Relative script outputs are anchored to
+the repository root. Allocation filenames retain the full bit budget, including
+1.25, 1.75 and 2.25; the native PKL/checkpoint layouts are unchanged.
