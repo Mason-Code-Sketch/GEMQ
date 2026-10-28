@@ -79,11 +79,8 @@ def test_triton_backend_rejects_unsupported_settings(checkpoint, extra):
         entry.prepare_backend(model, "tokenizer", args)
 
 
-def test_auto_backend_keeps_unsupported_expert_layout(checkpoint):
-    model = SimpleNamespace(
-        config=SimpleNamespace(model_type="qwen3_moe"),
-        model=SimpleNamespace(layers=[SimpleNamespace(mlp=SimpleNamespace(experts=object()))]),
-    )
+def test_auto_backend_keeps_unsupported_model_family(checkpoint):
+    model = SimpleNamespace(config=SimpleNamespace(model_type="unsupported_moe"))
     args = entry.parse_args(["--model_path", str(checkpoint)])
     assert entry.prepare_backend(model, "tokenizer", args) == "pytorch"
     args.backend = "triton"

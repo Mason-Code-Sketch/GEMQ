@@ -22,13 +22,14 @@ def quantize(weight, nbits, mse, hessian=None):
 @pytest.mark.parametrize("nbits", [1, 2, 3])
 @pytest.mark.parametrize("mse", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
-def test_unobserved_expert_decodes_to_exact_zero(nbits, mse, dtype):
+def test_unobserved_expert_preserves_nonzero_weights(nbits, mse, dtype):
     weight = torch.full((4, 128), 0.02, dtype=dtype)
     codes, scales, zeros, decoded = quantize(weight, nbits, mse)
     assert torch.isfinite(codes).all()
     assert torch.isfinite(scales).all()
     assert torch.isfinite(zeros).all()
-    assert torch.count_nonzero(decoded) == 0
+    assert torch.count_nonzero(decoded) > 0
+    torch.testing.assert_close(decoded, weight, rtol=1e-3, atol=1e-5)
 
 
 @pytest.mark.parametrize("nbits", [2, 3])
@@ -85,4 +86,4 @@ def test_gpu_zero_groups_survive_pipeline_packing(device, nbits, mse, unobserved
     ).reshape_as(weight)
     assert torch.equal(unpacked, reference)
     if unobserved:
-        assert torch.count_nonzero(unpacked) == 0
+        assert torch.count_nonzero(unpacked) > 0
