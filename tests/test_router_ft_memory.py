@@ -175,6 +175,7 @@ def test_packing_releases_old_modules_only_after_validation(monkeypatch):
         assert reference() is not model[0]
 
     monkeypatch.setattr(quantize, "replace_linears", replace)
+    monkeypatch.setattr(quantize, "replace_fused_moe_experts", Mock())
     monkeypatch.setattr(quantize, "check_packing", check)
     quantize.pack_quantized_model(model, quant_modules, packed_states, SimpleNamespace(model_name=MODEL_NAME))
     assert quant_modules == {}
@@ -221,6 +222,7 @@ def test_failed_packing_keeps_modules_for_diagnosis(monkeypatch):
     modules = {"0": torch.nn.Linear(4, 4)}
     packed_states = {0: {"weight": torch.ones(4)}}
     monkeypatch.setattr(quantize, "replace_linears", Mock())
+    monkeypatch.setattr(quantize, "replace_fused_moe_experts", Mock())
     monkeypatch.setattr(quantize, "check_packing", Mock(side_effect=RuntimeError("packing mismatch")))
     with pytest.raises(RuntimeError, match="packing mismatch"):
         quantize.pack_quantized_model(Mock(), modules, packed_states, SimpleNamespace(model_name=MODEL_NAME))

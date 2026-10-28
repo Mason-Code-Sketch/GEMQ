@@ -1,4 +1,4 @@
-"""HQQ-backed routed experts for Qwen1.5-MoE real quantization."""
+"""HQQ-backed routed experts for native fused MoE real quantization."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from gemq.utils.quant_utils import create_hqq_linear_from_quantized_weights
 
 
 QWEN2_HQQ_EXPERTS_CONFIG_KEY = "gemq_qwen2_hqq_experts"
+FUSED_HQQ_EXPERTS_CONFIG_KEY = "gemq_fused_hqq_experts"
 
 
 def hqq_state_to_cpu(module):
@@ -53,18 +54,19 @@ def hqq_linear_from_state(state, device, compute_dtype):
     return hqq_linear
 
 
-class HQQQwen2MoeExperts(nn.Module):
-    """Qwen2MoeExperts with one HQQLinear pair per routed expert."""
+class HQQFusedMoeExperts(nn.Module):
+    """Native fused expert tensors with one HQQLinear pair per routed expert."""
 
     def __init__(self, config, device="meta"):
         super().__init__()
-        self.num_experts = int(config.num_experts)
+        self.num_experts = int(config.num_local_experts if config.model_type == "mixtral" else config.num_experts)
+        intermediate_size = config.intermediate_size if config.model_type == "mixtral" else config.moe_intermediate_size
         self.act_fn = ACT2FN[config.hidden_act]
         self.gate_up_proj = nn.ModuleList(
             [
                 nn.Linear(
                     config.hidden_size,
-                    2 * config.moe_intermediate_size,
+                    2 * intermediate_size,
                     bias=False,
                     device=device,
                 )
@@ -74,7 +76,7 @@ class HQQQwen2MoeExperts(nn.Module):
         self.down_proj = nn.ModuleList(
             [
                 nn.Linear(
-                    config.moe_intermediate_size,
+                    intermediate_size,
                     config.hidden_size,
                     bias=False,
                     device=device,
@@ -86,13 +88,13 @@ class HQQQwen2MoeExperts(nn.Module):
     @classmethod
     @torch.no_grad()
     def from_hf(cls, config, hf_experts, packed_states):
-        """Build packed experts from Qwen's fused tensors and retained HQQ states."""
+        """Build packed experts from native fused tensors and retained HQQ states."""
         packed_experts = cls(config)
         expected_ids = set(range(packed_experts.num_experts))
         unexpected_ids = set(packed_states).difference(expected_ids)
         if unexpected_ids:
             raise ValueError(
-                f"Qwen1.5 packed expert states contain invalid ids: {sorted(unexpected_ids)}."
+                f"Fused MoE packed expert states contain invalid ids: {sorted(unexpected_ids)}."
             )
 
         for expert_id in range(packed_experts.num_experts):
@@ -120,7 +122,7 @@ class HQQQwen2MoeExperts(nn.Module):
         return packed_experts
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
-        """Match transformers' Qwen2MoeExperts routing and aggregation semantics."""
+        """Match transformers' fused-expert routing and aggregation semantics."""
         final_hidden_states = torch.zeros_like(hidden_states)
         with torch.no_grad():
             expert_mask = torch.nn.functional.one_hot(
@@ -145,7 +147,7 @@ class HQQQwen2MoeExperts(nn.Module):
         return final_hidden_states
 
 
-def _max_qwen2_expert_reconstruction_error(hf_experts, packed_experts):
+def _max_fused_expert_reconstruction_error(hf_experts, packed_experts):
     max_error = 0.0
     for expert_id in range(packed_experts.num_experts):
         for projection_name in ("gate_up_proj", "down_proj"):
@@ -159,8 +161,8 @@ def _max_qwen2_expert_reconstruction_error(hf_experts, packed_experts):
     return max_error
 
 
-def replace_qwen2_moe_experts(model, packed_states):
-    """Replace each Qwen fused expert tensor with HQQ-backed routed experts."""
+def replace_fused_moe_experts(model, packed_states):
+    """Replace each native fused expert tensor with HQQ-backed routed experts."""
     if not packed_states:
         return 0.0
 
@@ -168,41 +170,42 @@ def replace_qwen2_moe_experts(model, packed_states):
     invalid_layer_ids = set(packed_states).difference(range(len(layers)))
     if invalid_layer_ids:
         raise ValueError(
-            f"Qwen1.5 packed expert states contain invalid layers: {sorted(invalid_layer_ids)}."
+            f"Fused MoE packed expert states contain invalid layers: {sorted(invalid_layer_ids)}."
         )
 
     max_error = 0.0
     for layer_id, layer_states in packed_states.items():
         moe_block = layers[layer_id].mlp
         hf_experts = moe_block.experts
-        packed_experts = HQQQwen2MoeExperts.from_hf(
+        packed_experts = HQQFusedMoeExperts.from_hf(
             model.config, hf_experts, layer_states
         )
         max_error = max(
             max_error,
-            _max_qwen2_expert_reconstruction_error(hf_experts, packed_experts),
+            _max_fused_expert_reconstruction_error(hf_experts, packed_experts),
         )
         moe_block.experts = packed_experts
 
-    setattr(model.config, QWEN2_HQQ_EXPERTS_CONFIG_KEY, True)
-    print(f"Max Qwen routed-expert packing reconstruction error: {max_error}")
+    key = QWEN2_HQQ_EXPERTS_CONFIG_KEY if model.config.model_type == "qwen2_moe" else FUSED_HQQ_EXPERTS_CONFIG_KEY
+    setattr(model.config, key, True)
+    print(f"Max Fused routed-expert packing reconstruction error: {max_error}")
     return max_error
 
 
-def install_qwen2_moe_hqq_placeholders(model):
-    """Install meta-device Qwen HQQ expert placeholders before HQQ state loading."""
+def install_fused_moe_hqq_placeholders(model):
+    """Install meta-device fused HQQ expert placeholders before HQQ state loading."""
     for layer in model.model.layers:
         moe_block = layer.mlp
         if not hasattr(moe_block, "experts"):
-            raise TypeError("Qwen1.5 decoder layer is missing its routed-expert module.")
-        moe_block.experts = HQQQwen2MoeExperts(model.config)
+            raise TypeError("Fused MoE decoder layer is missing its routed-expert module.")
+        moe_block.experts = HQQFusedMoeExperts(model.config)
 
 
-class Qwen2MoeHQQModel(AutoHQQHFModel):
-    """HQQ loader that reconstructs Qwen packed routed-expert module names."""
+class FusedMoeHQQModel(AutoHQQHFModel):
+    """HQQ loader that reconstructs fused packed routed-expert module names."""
 
     @classmethod
     def create_model(cls, save_dir, kwargs):
         model = super().create_model(save_dir, kwargs)
-        install_qwen2_moe_hqq_placeholders(model)
+        install_fused_moe_hqq_placeholders(model)
         return model

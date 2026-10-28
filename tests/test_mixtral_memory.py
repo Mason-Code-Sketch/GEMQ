@@ -101,23 +101,30 @@ def test_layer_re_restores_cpu_storage_with_exact_scores(tmp_path, monkeypatch, 
 
 
 def legacy_scores(block, inputs, outputs, gradients, batch_size):
+    # Eagerly retain every candidate, as the old implementation did.
+    if hasattr(block.experts, "gate_up_proj"):
+        experts = [[block.experts.gate_up_proj[i], block.experts.down_proj[i]]
+                   for i in range(block.experts.num_experts)]
+    else:
+        experts = [[e.w1.weight, e.w2.weight, e.w3.weight] for e in block.experts]
+    originals = [[w.clone() for w in weights] for weights in experts]
     quantizers = {
-        (expert_id, bit, name): MCMoeRTNWeightQuantizer(getattr(expert, name).weight, bit)
-        for expert_id, expert in enumerate(block.experts)
-        for bit in (1, 2, 3) for name in ("w1", "w2", "w3")
+        (e, bit, j): MCMoeRTNWeightQuantizer(weight, bit)
+        for e, weights in enumerate(originals)
+        for bit in (1, 2, 3) for j, weight in enumerate(weights)
     }
     squared = gradients.double().pow(2).to(inputs.device)
     scores = {}
-    for expert_id, expert in enumerate(block.experts):
-        original = expert.state_dict()
-        scores[expert_id] = {}
+    for e, weights in enumerate(experts):
+        scores[e] = {}
         for bit in (1, 2, 3):
-            for name in ("w1", "w2", "w3"):
-                getattr(expert, name).weight.data = quantizers[expert_id, bit, name].quantize()
-            scores[expert_id][bit] = stats.compute_moe_reconstruction_error(
+            for j, weight in enumerate(weights):
+                weight.copy_(quantizers[e, bit, j].quantize())
+            scores[e][bit] = stats.compute_moe_reconstruction_error(
                 block, inputs, outputs, squared, batch_size,
             )
-            expert.load_state_dict(original)
+            for weight, original in zip(weights, originals[e]):
+                weight.copy_(original)
     return scores
 
 
@@ -130,9 +137,10 @@ def test_streamed_candidates_and_mapped_gradients_match_legacy(tmp_path, monkeyp
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     torch.manual_seed(13)
-    block = MixtralSparseMoeBlock(config()).to(device=device, dtype=dtype).eval()
+    block = MixtralForCausalLM(config()).model.layers[0].mlp.to(device=device, dtype=dtype).eval()
     inputs = torch.randn(3, 5, 128, dtype=dtype, device=device)
-    outputs = torch.cat([block(part)[0] for part in inputs.split(batch_size)])
+    outputs = torch.cat([stats.get_decoder_hidden_states(block(part), part.shape)
+                         for part in inputs.split(batch_size)])
     path = tmp_path / "gradients.pt"
     torch.save(torch.randn_like(inputs).cpu(), path)
     gradients = torch.load(path, mmap=True, weights_only=True)
@@ -189,7 +197,7 @@ def test_cached_half_gradient_squares_are_exact_and_do_not_alias(device):
 @pytest.mark.parametrize("cache_gradients", [False, True])
 @torch.inference_mode()
 def test_candidate_failure_restores_original_weights(monkeypatch, failure, cache_gradients):
-    block = MixtralSparseMoeBlock(config()).eval()
+    block = MixtralForCausalLM(config()).model.layers[0].mlp.eval()
     originals = {name: parameter.clone() for name, parameter in block.named_parameters()}
     inputs = torch.randn(1, 3, 128)
     calls = 0

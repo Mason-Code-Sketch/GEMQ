@@ -98,9 +98,10 @@ def load_quantized_model(
 ):
     """Load a real-quant checkpoint, honouring the modeling code shipped inside it."""
     from hqq.models.hf.base import AutoHQQHFModel
-    from gemq.inference.qwen2_moe import (
+    from gemq.inference.fused_moe import (
         QWEN2_HQQ_EXPERTS_CONFIG_KEY,
-        Qwen2MoeHQQModel,
+        FUSED_HQQ_EXPERTS_CONFIG_KEY,
+        FusedMoeHQQModel,
     )
 
     context = force_remote_code() if trust_remote_code else contextlib.nullcontext()
@@ -109,8 +110,9 @@ def load_quantized_model(
             model_path, trust_remote_code=trust_remote_code
         )
         hqq_model_cls = (
-            Qwen2MoeHQQModel
-            if getattr(config, QWEN2_HQQ_EXPERTS_CONFIG_KEY, False)
+            FusedMoeHQQModel
+            if (getattr(config, QWEN2_HQQ_EXPERTS_CONFIG_KEY, False)
+                or getattr(config, FUSED_HQQ_EXPERTS_CONFIG_KEY, False))
             else AutoHQQHFModel
         )
         model = hqq_model_cls.from_quantized(
