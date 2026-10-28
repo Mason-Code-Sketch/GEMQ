@@ -10,10 +10,10 @@ from hqq.models.hf.base import AutoHQQHFModel
 from transformers import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
 
-from gemq.inference.qwen2_moe import (
-    HQQQwen2MoeExperts,
+from gemq.inference.fused_moe import (
+    HQQFusedMoeExperts,
     hqq_state_from_quantized_weight,
-    replace_qwen2_moe_experts,
+    replace_fused_moe_experts,
 )
 from gemq.utils.hf_loading import load_quantized_model
 
@@ -94,7 +94,7 @@ class Qwen15RealQuantTest(unittest.TestCase):
         _initialize(moe_block)
         packed_states = _pack_qwen_experts(moe_block)
         reference = moe_block.experts
-        packed = HQQQwen2MoeExperts.from_hf(config, reference, packed_states)
+        packed = HQQFusedMoeExperts.from_hf(config, reference, packed_states)
 
         hidden_states = torch.randn(6, config.hidden_size, device=DEVICE, dtype=torch.float16)
         top_k_index = torch.tensor(
@@ -117,7 +117,7 @@ class Qwen15RealQuantTest(unittest.TestCase):
         input_ids = torch.tensor([[1, 2, 3, 4, 5, 6]], device=DEVICE)
 
         expected_logits = model(input_ids=input_ids).logits
-        replace_qwen2_moe_experts(model, {0: packed_states})
+        replace_fused_moe_experts(model, {0: packed_states})
         packed_logits = model(input_ids=input_ids).logits
         torch.testing.assert_close(packed_logits, expected_logits, rtol=2e-2, atol=2e-2)
 
@@ -130,7 +130,7 @@ class Qwen15RealQuantTest(unittest.TestCase):
                 trust_remote_code=False,
             ).eval()
             self.assertIsInstance(
-                loaded.model.layers[0].mlp.experts, HQQQwen2MoeExperts
+                loaded.model.layers[0].mlp.experts, HQQFusedMoeExperts
             )
             actual_logits = loaded(input_ids=input_ids).logits
             torch.testing.assert_close(actual_logits, packed_logits, rtol=2e-2, atol=2e-2)

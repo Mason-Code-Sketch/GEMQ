@@ -220,33 +220,38 @@ def get_decoder_hidden_states(output, expected_shape=None):
     return hidden_states
 
 
-def get_qwen2_num_routed_experts(moe_block):
-    """Read the routed-expert count from Qwen1.5's fused expert tensors."""
+def has_fused_experts(moe_block):
+    experts = getattr(moe_block, "experts", None)
+    return isinstance(getattr(experts, "gate_up_proj", None), torch.Tensor)
+
+
+def get_fused_num_routed_experts(moe_block):
+    """Read the routed-expert count from native fused expert tensors."""
     try:
         gate_up_proj = moe_block.experts.gate_up_proj
         down_proj = moe_block.experts.down_proj
     except AttributeError as error:
         raise TypeError(
-            "Qwen1.5 fused MoE block must expose experts.gate_up_proj and "
+            "Native fused MoE block must expose experts.gate_up_proj and "
             "experts.down_proj."
         ) from error
 
     if gate_up_proj.ndim != 3 or down_proj.ndim != 3:
         raise ValueError(
-            "Qwen1.5 fused expert weights must be rank-3 tensors, got "
+            "Native fused expert weights must be rank-3 tensors, got "
             f"gate_up_proj={tuple(gate_up_proj.shape)} and down_proj={tuple(down_proj.shape)}."
         )
     num_routed_experts = gate_up_proj.shape[0]
     if down_proj.shape[0] != num_routed_experts:
         raise ValueError(
-            "Qwen1.5 fused expert tensors disagree on routed-expert count: "
+            "Native fused expert tensors disagree on routed-expert count: "
             f"gate_up_proj={num_routed_experts}, down_proj={down_proj.shape[0]}."
         )
 
     declared_count = getattr(moe_block.experts, "num_experts", None)
     if declared_count is not None and declared_count != num_routed_experts:
         raise ValueError(
-            "Qwen1.5 experts.num_experts disagrees with fused weight tensors: "
+            "experts.num_experts disagrees with fused weight tensors: "
             f"declared={declared_count}, tensors={num_routed_experts}."
         )
 
@@ -273,7 +278,7 @@ def validate_qwen2_moe_model(model, model_name):
     expected_routed_experts = get_model_info(model_name).num_routed_experts_per_layer
     for layer_idx, layer in enumerate(get_blocks(model, model_name)):
         moe_block = get_moe_block(layer, model_name)
-        actual_routed_experts = get_qwen2_num_routed_experts(moe_block)
+        actual_routed_experts = get_fused_num_routed_experts(moe_block)
         if actual_routed_experts != expected_routed_experts:
             raise ValueError(
                 f"Qwen1.5 layer {layer_idx} has {actual_routed_experts} routed experts; "
@@ -293,7 +298,7 @@ def get_moe_block(layer, model_name):
     """
     model_type = NAME_TO_MODEL[model_name]
     if model_type == ModelType.MIXTRAL:
-        moe_block = layer.block_sparse_moe
+        moe_block = getattr(layer, "block_sparse_moe", None) or layer.mlp
     elif model_type == ModelType.DEEPSEEKV2:
         moe_block = layer.mlp
     elif model_type == ModelType.OLMOE:
@@ -579,7 +584,7 @@ def compute_gate_stats_hook_mixtral(m, x, y, inps, outs, weights, counts):
 
     hidden_states = x[0]  # (bsz, seqlen, hidden_size)
     final_hidden_states = y[0]  # (bsz, seqlen, hidden_size)
-    router_logits = y[1]  # (bsz * sequence_length, n_experts)
+    router_logits = m.gate(hidden_states.reshape(-1, hidden_states.shape[-1]))[0] if isinstance(y, torch.Tensor) else y[1]  # (bsz * sequence_length, n_experts)
     
     # compute gate outputs
     # routing_weights:  (batch * sequence_length, topk)
@@ -588,19 +593,19 @@ def compute_gate_stats_hook_mixtral(m, x, y, inps, outs, weights, counts):
     routing_weights, selected_experts = torch.topk(routing_weights, m.top_k, dim=-1)
 
     # compute weights
-    actw = torch.zeros(m.num_experts, device=router_logits.device)
+    actw = torch.zeros(getattr(m, "num_experts", getattr(m.experts, "num_experts", 0)), device=router_logits.device)
     actw.scatter_add_(0, selected_experts.view(-1), routing_weights.view(-1))
     weights.append(actw.to("cpu"))
 
     # compute counts
-    actc = torch.zeros(m.num_experts, dtype=torch.long, device=router_logits.device)
+    actc = torch.zeros(getattr(m, "num_experts", getattr(m.experts, "num_experts", 0)), dtype=torch.long, device=router_logits.device)
     ones = torch.ones_like(selected_experts.view(-1), device=router_logits.device)
     actc.scatter_add_(0, selected_experts.view(-1), ones)
     counts.append(actc.to("cpu"))
 
     # save inputs and outputs
     inps.append(x[0])  # (bsz, seqlen, hidden_size)
-    outs.append(y[0])  # (bsz, seqlen, hidden_size)
+    outs.append(y if isinstance(y, torch.Tensor) else y[0])  # (bsz, seqlen, hidden_size)
 
 
 def compute_gate_stats_hook_deepseekmoe(m, x, y, inps, outs, weights, counts):
@@ -723,7 +728,7 @@ def compute_gate_stats_hook_qwen2moe(m, x, y, inps, outs, weights, counts):
     hidden_states = x[0]
     flat_hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
     _, routing_weights, selected_experts = m.gate(flat_hidden_states)
-    num_routed_experts = get_qwen2_num_routed_experts(m)
+    num_routed_experts = get_fused_num_routed_experts(m)
 
     actw = torch.zeros(num_routed_experts, device=flat_hidden_states.device)
     actw.scatter_add_(0, selected_experts.reshape(-1), routing_weights.reshape(-1))

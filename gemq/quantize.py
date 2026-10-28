@@ -22,9 +22,9 @@ from gemq.utils.hf_loading import (
     ensure_deepseek_v2_remote_code_compat,
     normalize_legacy_tied_weights_for_serialization,
 )
-from gemq.inference.qwen2_moe import (
+from gemq.inference.fused_moe import (
     hqq_state_from_quantized_weight,
-    replace_qwen2_moe_experts,
+    replace_fused_moe_experts,
 )
 from gemq.resource_ledger import ResourceLedger
 
@@ -76,33 +76,33 @@ def make_gptq_quantizer(weight, name, wbits, args):
     )
 
 
-def get_qwen2_expert_bits(args, allocation, layer_idx, num_routed_experts):
-    num_scored_experts = num_routed_experts + 1
+def get_fused_expert_bits(args, allocation, layer_idx, num_routed_experts):
+    num_scored_experts = num_routed_experts + int(NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE)
     if not args.mixed:
         return [args.expert_wbits] * num_scored_experts
     if allocation is None:
-        raise ValueError("Mixed Qwen1.5 quantization requires a bit allocation.")
+        raise ValueError("Mixed fused-expert quantization requires a bit allocation.")
     layer_allocation = allocation[layer_idx]
     expected_expert_ids = set(range(num_scored_experts))
     actual_expert_ids = set(layer_allocation)
     if actual_expert_ids != expected_expert_ids:
         raise ValueError(
-            f"Qwen1.5 layer {layer_idx} allocation has expert ids "
+            f"Fused MoE layer {layer_idx} allocation has expert ids "
             f"{sorted(actual_expert_ids)}, expected {sorted(expected_expert_ids)}."
         )
     return [layer_allocation[expert_id] for expert_id in range(num_scored_experts)]
 
 
-def build_qwen2_expert_quantizers(moe_block, expert_bits, args):
-    num_routed_experts = get_qwen2_num_routed_experts(moe_block)
-    if len(expert_bits) != num_routed_experts + 1:
+def build_fused_expert_quantizers(moe_block, expert_bits, args):
+    num_routed_experts = get_fused_num_routed_experts(moe_block)
+    if len(expert_bits) != num_routed_experts + int(hasattr(moe_block, "shared_expert")):
         raise ValueError(
-            "Qwen1.5 expert bit allocation must include every routed expert and "
+            "Fused MoE bit allocation must include every routed expert and "
             f"one shared expert, got {len(expert_bits)} entries for "
             f"{num_routed_experts} routed experts."
         )
     quantizers = {}
-    for expert_id, bitwidth in enumerate(expert_bits[:-1]):
+    for expert_id, bitwidth in enumerate(expert_bits[:num_routed_experts]):
         if bitwidth >= 16:
             continue
         quantizers[expert_id] = {
@@ -122,7 +122,7 @@ def build_qwen2_expert_quantizers(moe_block, expert_bits, args):
     return quantizers
 
 
-def collect_qwen2_expert_hessians(moe_block, inputs, quantizers):
+def collect_fused_expert_hessians(moe_block, inputs, quantizers):
     hidden_states = inputs[0].detach().reshape(-1, inputs[0].shape[-1])
     _, _, selected_experts = moe_block.gate(hidden_states)
     for expert_id, expert_quantizers in quantizers.items():
@@ -139,7 +139,7 @@ def collect_qwen2_expert_hessians(moe_block, inputs, quantizers):
 
 
 @torch.no_grad()
-def quantize_qwen2_expert_weights(moe_block, quantizers, args):
+def quantize_fused_expert_weights(moe_block, quantizers, args):
     packed_states = {}
     for expert_id, expert_quantizers in quantizers.items():
         for projection_name, quantizer in expert_quantizers.items():
@@ -344,11 +344,13 @@ def quantize_weights_gptq(model, dataloader, args):
     # build a bit allocation config for each Linear module
     bit_cfg = build_alloc_cfg(model, args)
     model_type = NAME_TO_MODEL[args.model_name]
-    qwen2_allocation = None
-    qwen2_packed_states = {}
-    if model_type == ModelType.QWEN2MOE and args.mixed:
+    first_layer = get_blocks(model, args.model_name)[0]
+    fused_experts = model_type == ModelType.QWEN2MOE or has_fused_experts(getattr(first_layer, "mlp", None))
+    fused_allocation = None
+    fused_packed_states = {}
+    if fused_experts and args.mixed:
         with open(args.bit_cfg, "rb") as file:
-            qwen2_allocation = pickle.load(file)
+            fused_allocation = pickle.load(file)
 
     # prepare decoder inputs and kwargs for model forward
     inps, layer_kwargs = compute_decoder_inputs(model, dataloader, args.model_name, "cuda")
@@ -372,10 +374,10 @@ def quantize_weights_gptq(model, dataloader, args):
         named_linears = get_named_linears(layer)
         moe_block = (
             get_moe_block(layer, args.model_name)
-            if model_type == ModelType.QWEN2MOE else None
+            if fused_experts else None
         )
-        qwen2_num_routed_experts = (
-            get_qwen2_num_routed_experts(moe_block)
+        fused_num_routed_experts = (
+            get_fused_num_routed_experts(moe_block)
             if moe_block is not None else None
         )
 
@@ -407,18 +409,18 @@ def quantize_weights_gptq(model, dataloader, args):
                     partial(update_hessian_hook, quantizer=quantizers[name])
                 )
             )
-        qwen2_quantizers = None
-        qwen2_handle = None
-        if model_type == ModelType.QWEN2MOE:
-            qwen2_quantizers = build_qwen2_expert_quantizers(
+        fused_quantizers = None
+        fused_handle = None
+        if fused_experts:
+            fused_quantizers = build_fused_expert_quantizers(
                 moe_block,
-                get_qwen2_expert_bits(
-                    args, qwen2_allocation, i, qwen2_num_routed_experts
+                get_fused_expert_bits(
+                    args, fused_allocation, i, fused_num_routed_experts
                 ),
                 args,
             )
-            qwen2_handle = moe_block.register_forward_pre_hook(
-                partial(collect_qwen2_expert_hessians, quantizers=qwen2_quantizers)
+            fused_handle = moe_block.register_forward_pre_hook(
+                partial(collect_fused_expert_hessians, quantizers=fused_quantizers)
             )
         for j in range(args.nsamples):
             batch_inps = inps[j: j+1]
@@ -427,8 +429,8 @@ def quantize_weights_gptq(model, dataloader, args):
             )
         for h in handles:
             h.remove()
-        if qwen2_handle is not None:
-            qwen2_handle.remove()
+        if fused_handle is not None:
+            fused_handle.remove()
 
         elapse = time.time() - start
         if args.verbose:
@@ -458,12 +460,12 @@ def quantize_weights_gptq(model, dataloader, args):
             if args.verbose:
                 print(f"| {name:<30} | {quantizers[name].nbits:<3} | {quantizers[name].groupsize:>4} | {elapse:>9.2f} |")
 
-        if qwen2_quantizers is not None:
-            packed_states = quantize_qwen2_expert_weights(
-                moe_block, qwen2_quantizers, args
+        if fused_quantizers is not None:
+            packed_states = quantize_fused_expert_weights(
+                moe_block, fused_quantizers, args
             )
             if packed_states:
-                qwen2_packed_states[i] = packed_states
+                fused_packed_states[i] = packed_states
 
         # compute layer outputs using quantized weights
         start = time.time()
@@ -491,7 +493,7 @@ def quantize_weights_gptq(model, dataloader, args):
 
     model.config.use_cache = use_cache  # restore
 
-    return quant_modules, qwen2_packed_states
+    return quant_modules, fused_packed_states
 
 
 def parse_args():
@@ -738,14 +740,14 @@ if __name__ == "__main__":
             dataloader = get_calib_loader(tokenizer, args)
 
         quant_modules = {}
-        qwen2_packed_states = {}
+        fused_packed_states = {}
         if not args.eval_fp:
             print("Start quantizing model weights ...")
             quantizer = args.quantizer.lower().split("-")[0]
             if quantizer != "gptq":
                 raise ValueError(f"Unsupported weight quantizer: {args.quantizer}")
             with resource_ledger.component("quant_gptq"):
-                quant_modules, qwen2_packed_states = quantize_weights_gptq(
+                quant_modules, fused_packed_states = quantize_weights_gptq(
                     model, dataloader, args
                 )
 
@@ -819,8 +821,8 @@ if __name__ == "__main__":
                         quant_modules,
                         quant_weight=True,
                     )
-                    if NAME_TO_MODEL[args.model_name] == ModelType.QWEN2MOE:
-                        replace_qwen2_moe_experts(model, qwen2_packed_states)
+                    if fused_packed_states:
+                        replace_fused_moe_experts(model, fused_packed_states)
                     check_packing(model, quant_modules, args)
                 else:
                     for name, module in quant_modules.items():
@@ -855,7 +857,7 @@ if __name__ == "__main__":
             # Reload exactly the saved final model, including its trained routers.
             evaluation_dtype = str(next(model.parameters()).dtype).removeprefix("torch.")
             quant_modules.clear()
-            qwen2_packed_states.clear()
+            fused_packed_states.clear()
             del model
             gc.collect()
             torch.cuda.empty_cache()

@@ -11,14 +11,14 @@ from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBl
 from gemq import compute_model_stats
 from gemq.quantize import (
     capture_router_finetune_state,
-    get_qwen2_expert_bits,
-    quantize_qwen2_expert_weights,
+    get_fused_expert_bits,
+    quantize_fused_expert_weights,
     validate_router_finetune_state,
 )
 from gemq.utils.model_utils import (
     compute_gate_stats_hook_qwen2moe,
     get_decoder_hidden_states,
-    get_qwen2_num_routed_experts,
+    get_fused_num_routed_experts,
     get_router_params,
     validate_qwen2_moe_model,
 )
@@ -91,7 +91,7 @@ class Qwen15AdaptationTest(unittest.TestCase):
         self.assertIsInstance(output, torch.Tensor)
         self.assertEqual(tuple(output.shape), tuple(hidden_states.shape))
         self.assertFalse(hasattr(block, "num_experts"))
-        self.assertEqual(get_qwen2_num_routed_experts(block), 3)
+        self.assertEqual(get_fused_num_routed_experts(block), 3)
 
     def test_decoder_output_extraction_rejects_missing_batch_dimension(self):
         hidden_states = torch.randn(2, 3, 4)
@@ -202,7 +202,7 @@ class Qwen15AdaptationTest(unittest.TestCase):
         target = block.experts.gate_up_proj[0]
         quantizer = _FlatFakeQuantizer(target)
 
-        quantize_qwen2_expert_weights(
+        quantize_fused_expert_weights(
             block,
             {0: {"gate_up_proj": quantizer}},
             SimpleNamespace(verbose=False),
@@ -214,11 +214,11 @@ class Qwen15AdaptationTest(unittest.TestCase):
     def test_qwen_bit_allocation_is_checked_against_runtime_expert_count(self):
         allocation = {0: {0: 1, 1: 2, 2: 3, 3: 3}}
 
-        self.assertEqual(get_qwen2_expert_bits(SimpleNamespace(mixed=False, expert_wbits=2), None, 0, 3), [2, 2, 2, 2])
-        self.assertEqual(get_qwen2_expert_bits(SimpleNamespace(mixed=True), allocation, 0, 3), [1, 2, 3, 3])
+        self.assertEqual(get_fused_expert_bits(SimpleNamespace(model_name="Qwen/Qwen1.5-MoE-A2.7B", mixed=False, expert_wbits=2), None, 0, 3), [2, 2, 2, 2])
+        self.assertEqual(get_fused_expert_bits(SimpleNamespace(model_name="Qwen/Qwen1.5-MoE-A2.7B", mixed=True), allocation, 0, 3), [1, 2, 3, 3])
         with self.assertRaisesRegex(ValueError, "expected"):
-            get_qwen2_expert_bits(
-                SimpleNamespace(mixed=True), {0: {0: 1, 1: 2, 2: 3}}, 0, 3
+            get_fused_expert_bits(
+                SimpleNamespace(model_name="Qwen/Qwen1.5-MoE-A2.7B", mixed=True), {0: {0: 1, 1: 2, 2: 3}}, 0, 3
             )
 
     def test_qwen_router_sanity_uses_parameter_identity(self):
