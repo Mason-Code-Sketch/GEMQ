@@ -20,7 +20,7 @@ def test_floating_grid_search_and_dead_columns(cls):
 
 def test_combined_seven_task_entry_loads_saved_router_checkpoint():
     from gemq.quantize import evaluate_saved_downstream
-    args = SimpleNamespace(save_path="final-router-ft", save_dtype="float16",
+    args = SimpleNamespace(save_path="final-router-ft", save_dtype="float16", model_dtype="float16",
         downstream_tasks="piqa,arc_easy,arc_challenge,hellaswag,winogrande,mathqa,mmlu",
         lm_eval_batchsize=8, seed=0)
     with patch("gemq.eval_zeroshot.main") as evaluate:
@@ -39,6 +39,6 @@ def test_low_bit_compensation_changes_the_next_column(cls, bits):
     factor = torch.tensor([[1., 2.], [0., 1.]])
     quantizer = cls(weight, nbits=bits, groupsize=2, blocksize=2)
     with patch.object(quantizer, "find_params", return_value=(scale, zero, 2**bits-1)), \
-         patch("gemq.quantizers.hessian.inverse_hessian_factor", return_value=factor):
+         patch("gemq.quantizers.gptq.inverse_hessian_factor", return_value=factor):
         result = quantizer.dequantize(*quantizer.quantize()).reshape_as(weight)
     assert torch.equal(result, torch.tensor([[-.5, -.5]], dtype=torch.float16))
