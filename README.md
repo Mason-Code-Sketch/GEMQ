@@ -158,3 +158,21 @@ If you find GEMQ useful for your research or project, please consider citing:
   year={2026}
 }
 ```
+
+
+### BF16 resident grouped seven-task evaluation
+
+`grouped_cached` supports packed FP16/BF16 DeepSeek-V2-Lite, Qwen1.5-MoE,
+Qwen3-MoE and Mixtral checkpoints. It decodes weights once, retains them for the
+evaluation, and computes routed experts with `torch._grouped_mm`. Quantization
+and Router FT are not rerun. Native router and expert accumulation semantics are
+preserved, and the entry point checks pre/post-conversion logits before scoring.
+
+```sh
+python -m gemq.eval_zeroshot --model_path /absolute/path/to/checkpoint \
+  --model_dtype bfloat16 --backend grouped_cached --batch_size auto --max_batch_size 8
+```
+
+Use `--layer-devices cuda:0 cuda:1` (or more visible devices) when the resident
+decoded model does not fit on one GPU. Existing FP16 `cached`/`auto` behavior and
+Triton settings remain available; checkpoint files are unchanged.

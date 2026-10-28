@@ -54,7 +54,7 @@ def parse_args(argv=None):
     parser.add_argument("--trust_remote_code", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--layer-devices", nargs="+", metavar="CUDA_DEVICE",
-                        help="Distribute packed DeepSeek, Qwen1.5, Qwen3 or Mixtral decoder layers "
+                        help="Distribute packed FP16/BF16 DeepSeek, Qwen1.5, Qwen3 or Mixtral decoder layers "
                              "over the listed CUDA devices and cache decoded weights")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "grouped_cached", "triton"), default="auto",
@@ -74,8 +74,8 @@ def parse_args(argv=None):
     if args.limit is not None and args.output is not None:
         parser.error("--limit reports to the terminal and cannot be combined with --output")
     if args.layer_devices:
-        if args.is_fp or args.model_dtype != "float16" or args.backend not in ("auto", "cached", "grouped_cached"):
-            parser.error("--layer-devices requires a packed FP16 checkpoint and auto/cached backend")
+        if args.is_fp or args.model_dtype not in ("float16", "bfloat16") or args.backend not in ("auto", "cached", "grouped_cached"):
+            parser.error("--layer-devices requires a packed FP16/BF16 checkpoint and auto/cached/grouped_cached backend")
         if len(set(args.layer_devices)) != len(args.layer_devices) or any(
             not device.startswith("cuda:") or not device[5:].isdigit() for device in args.layer_devices
         ):
@@ -147,7 +147,7 @@ def prepare_backend(model, tokenizer, args):
     )
     layerwise = bool(args.layer_devices)
     if args.backend == "grouped_cached":
-        supported = (not args.is_fp and args.model_dtype == "float16"
+        supported = (not args.is_fp and args.model_dtype in ("float16", "bfloat16")
                      and args.device.startswith("cuda")
                      and model.config.model_type in ("qwen3_moe", "qwen2_moe", "mixtral", "deepseek_v2"))
     elif supported:
@@ -158,7 +158,7 @@ def prepare_backend(model, tokenizer, args):
         return backend
     if not supported and not layerwise:
         raise ValueError("The accelerated evaluation backend requires a packed Qwen3 FP16 model "
-                         "on CUDA with ModuleList experts")
+                         "on CUDA with ModuleList experts; grouped_cached also supports BF16 and the four MoE families")
 
     # Check both single-sequence and batched prefill before evaluating any tasks.
     device = model.get_input_embeddings().weight.device
