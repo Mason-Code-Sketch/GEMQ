@@ -775,7 +775,7 @@ if __name__ == "__main__":
     if args.eval_downstream and args.num_fewshot != 0:
         raise ValueError("The aligned seven-task protocol requires zero-shot evaluation")
     print(json.dumps(vars(args), indent=4))
-    resource_ledger = ResourceLedger(args.resource_output)
+    resource_ledger = ResourceLedger(args.resource_output or (os.path.join(args.save_path, "resource_breakdown.json") if args.save_path else f"results/resource-records/{args.model_name}/quantize.json"))
 
     validate_checkpoint_paths(args)
 
@@ -898,18 +898,19 @@ if __name__ == "__main__":
                         module.quant_nbits = None
                         module.quant_groupsize = None
 
-                if args.eval_real_quant:
-                    with resource_ledger.component("evaluation_real_quant"):
-                        print("Evaluating real-quant model ...")
-                        evaluate_perplexity(
-                            model,
-                            tokenizer,
-                            ["wikitext2", "c4"],
-                            args.model_name,
-                            offload=False,
-                            dataset_root=args.dataset_root,
-                        )
+            if args.eval_real_quant:
+                with resource_ledger.component("evaluation_real_quant"):
+                    print("Evaluating real-quant model ...")
+                    evaluate_perplexity(
+                        model,
+                        tokenizer,
+                        ["wikitext2", "c4"],
+                        args.model_name,
+                        offload=False,
+                        dataset_root=args.dataset_root,
+                    )
 
+            with resource_ledger.component("checkpoint_save"):
                 release_unused_memory()
                 save_quantized_model(
                     model,
