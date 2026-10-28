@@ -78,6 +78,8 @@ def test_gptq_router_checkpoint_grouped_roundtrip(tmp_path):
         assert isinstance(loaded.model.layers[0].mlp.experts, HQQFusedMoeExperts)
         logits = loaded(data[0][0]).logits
         torch.testing.assert_close(logits, actual, rtol=2e-3, atol=2e-3)
+        from gemq.inference.cached_linear import cache_quantized_linears
+        cache_quantized_linears(loaded)
         install_grouped_cached(loaded)
         grouped = loaded(data[0][0]).logits
         torch.testing.assert_close(grouped, logits, rtol=2e-3, atol=2e-3)
