@@ -98,10 +98,13 @@ def tiny_model(kind):
 
 
 @pytest.mark.parametrize("kind", ["deepseek_v2", "qwen2_moe", "qwen3_moe", "mixtral"])
-def test_bfloat16_native_fused_logits(kind):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_bfloat16_native_fused_logits(kind, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
     from gemq.inference.grouped_cached import install_grouped_cached
-    model = tiny_model(kind)
-    ids = torch.randint(0, 32, (2, 9))
+    model = tiny_model(kind).to(device)
+    ids = torch.randint(0, 32, (2, 9), device=device)
     routers = [(name, item, item.weight.detach().clone()) for name, item in model.named_modules()
                if name.endswith(".gate")]
     with torch.inference_mode():
