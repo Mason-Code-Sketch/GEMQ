@@ -12,23 +12,43 @@ def _linear(inputs, weights, offsets):
     return torch._grouped_mm(inputs, weights.transpose(1, 2), offs=offsets)
 
 
+SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _projection_weights(experts):
+    fused = not isinstance(experts, nn.ModuleList)
+    names = (("gate_up_proj", "down_proj") if fused else
+             ("w1", "w3", "w2") if hasattr(experts[0], "w1") else
+             ("gate_proj", "up_proj", "down_proj"))
+    weights = {}
+    for name in names:
+        projections = getattr(experts, name) if fused else [getattr(expert, name) for expert in experts]
+        if isinstance(projections, torch.Tensor):
+            value = projections.detach()
+        else:
+            if any(not isinstance(proj, CachedQuantLinear) or proj.bias is not None
+                   for proj in projections):
+                raise ValueError("Expected cached FP16/BF16 bias-free expert projections")
+            value = torch.stack([proj.weight for proj in projections])
+        if value.ndim != 3 or value.dtype not in SUPPORTED_DTYPES:
+            raise ValueError("Expected cached FP16/BF16 three-dimensional expert projections")
+        target = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}.get(name, name)
+        weights[target] = value
+    if len({value.dtype for value in weights.values()}) != 1 or len({value.device for value in weights.values()}) != 1:
+        raise ValueError("Expert projections must share one dtype and device")
+    return weights
+
+
 class GroupedCachedExperts(nn.Module):
     def __init__(self, experts, fp32_topk=False):
         super().__init__()
         self.fp32_topk = fp32_topk
+        for name, value in _projection_weights(experts).items():
+            self.register_buffer(name, value, persistent=False)
+        self.compute_dtype = self.down_proj.dtype
         fused = not isinstance(experts, nn.ModuleList)
-        names = (("gate_up_proj", "down_proj") if fused else
-                 ("w1", "w3", "w2") if hasattr(experts[0], "w1") else
-                 ("gate_proj", "up_proj", "down_proj"))
-        for name in names:
-            projections = list(getattr(experts, name)) if fused else [getattr(expert, name) for expert in experts]
-            if any(not isinstance(proj, CachedQuantLinear) or proj.bias is not None
-                   or proj.weight.dtype != torch.float16 for proj in projections):
-                raise ValueError("Expected cached FP16 bias-free expert projections")
-            target = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}.get(name, name)
-            self.register_buffer(target, torch.stack([proj.weight for proj in projections]), persistent=False)
         self.act_fn = experts.act_fn if fused else experts[0].act_fn
-        self.num_experts = experts.num_experts if fused else len(experts)
+        self.num_experts = self.down_proj.shape[0]
 
     def __len__(self):
         return self.num_experts
@@ -36,8 +56,8 @@ class GroupedCachedExperts(nn.Module):
     def forward(self, hidden, indices, weights):
         if self.training or torch.is_grad_enabled():
             raise RuntimeError("Grouped cached experts are restricted to gradient-free evaluation")
-        if hidden.dtype != torch.float16:
-            raise ValueError("Grouped cached experts require original FP16 arithmetic")
+        if hidden.dtype != self.compute_dtype:
+            raise ValueError("Grouped cached experts require the original expert compute dtype")
         tokens, top_k = indices.shape
         # Match torch.where(mask[expert]) enumeration: top-k slot, then token.
         ids = indices.reshape(-1) if self.fp32_topk else indices.T.contiguous().reshape(-1)
@@ -101,26 +121,17 @@ def install_grouped_cached(model):
     if not blocks:
         raise ValueError("No routed expert blocks found")
     if kind == "deepseek_v2" and any(
-        not hasattr(block, "moe_infer") or getattr(block, "ep_size", 1) != 1 for block in blocks
+        isinstance(block.experts, nn.ModuleList) and
+        (not hasattr(block, "moe_infer") or getattr(block, "ep_size", 1) != 1) for block in blocks
     ):
         raise ValueError("DeepSeek grouped evaluation requires original single-rank moe_infer")
-    # Validate every layer before modifying any layer.
+    # Validate every layer before modifying any layer, without retaining stacks.
     for block in blocks:
-        experts = block.experts
-        fused = not isinstance(experts, nn.ModuleList)
-        names = (("gate_up_proj", "down_proj") if fused else
-                 ("w1", "w3", "w2") if hasattr(experts[0], "w1") else
-                 ("gate_proj", "up_proj", "down_proj"))
-        for name in names:
-            projections = list(getattr(experts, name)) if fused else [getattr(expert, name) for expert in experts]
-            for proj in projections:
-                if not isinstance(proj, CachedQuantLinear) or proj.bias is not None or proj.weight.dtype != torch.float16:
-                    raise ValueError("Expected cached FP16 bias-free expert projections")
-    del experts, projections, proj
+        _projection_weights(block.experts)
     for block in blocks:
         fused = not isinstance(block.experts, nn.ModuleList)
-        block.experts = GroupedCachedExperts(block.experts, fp32_topk=kind == "deepseek_v2").eval()
-        if kind == "deepseek_v2":
+        block.experts = GroupedCachedExperts(block.experts, fp32_topk=kind == "deepseek_v2" and not fused).eval()
+        if kind == "deepseek_v2" and not fused:
             block.moe_infer = MethodType(grouped_deepseek_infer, block)
         elif not fused:
             attribute = "_old_forward" if hasattr(block, "_hf_hook") else "forward"

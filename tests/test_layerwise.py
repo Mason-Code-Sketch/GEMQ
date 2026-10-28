@@ -136,7 +136,7 @@ def test_packed_metadata_moves_before_dispatch(monkeypatch):
 
 
 @pytest.mark.parametrize("extra", [
-    ["--is_fp"], ["--model_dtype", "bfloat16"], ["--backend", "pytorch"],
+    ["--is_fp"], ["--model_dtype", "float32"], ["--backend", "pytorch"],
     ["--layer-devices", "cpu"], ["--layer-devices", "cuda:0", "cuda:0"],
 ])
 def test_layerwise_cli_rejects_incompatible_settings(extra):
@@ -153,3 +153,10 @@ def test_layerwise_cli_preserves_evaluation_defaults():
     assert args.backend == "auto"
     assert args.seed == 0
     assert args.max_batch_size == 8
+
+
+def test_layerwise_grouped_accepts_bfloat16():
+    from gemq.eval_zeroshot import parse_args
+    args = parse_args(["--model_path", "/unused", "--model_dtype", "bfloat16",
+                       "--backend", "grouped_cached", "--layer-devices", "cuda:0", "cuda:1"])
+    assert args.model_dtype == "bfloat16" and args.backend == "grouped_cached"
