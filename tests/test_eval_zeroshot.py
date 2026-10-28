@@ -198,6 +198,7 @@ def test_harness_receives_batch_limit_seeds_and_zero_shot(monkeypatch):
     assert wrapper.call_args.kwargs["pretrained"] == "model"
     assert wrapper.call_args.kwargs["batch_size"] == "auto"
     assert wrapper.call_args.kwargs["max_batch_size"] == 4
+    assert wrapper.call_args.kwargs["add_bos_token"] is False
     options = evaluate.call_args.kwargs
     assert options["num_fewshot"] == 0
     assert options["limit"] == 4
