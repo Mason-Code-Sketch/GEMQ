@@ -8,6 +8,7 @@ from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
+from gemq.resource_ledger import ResourceLedger
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -239,18 +240,22 @@ def main(argv=None):
             log = stack.enter_context(output.with_suffix(".log").open("x"))
             stack.enter_context(redirect_stdout(_Tee(sys.stdout, log)))
             stack.enter_context(redirect_stderr(_Tee(sys.stderr, log)))
+        ledger = ResourceLedger(output.with_suffix(".resources.json") if output is not None else None)
+        stack.enter_context(ledger.command())
         start = perf_counter()
         try:
             torch.manual_seed(args.seed)
             print(f"Loading checkpoint: {args.model_path}", flush=True)
-            model, tokenizer = load_model(args)
+            with ledger.component("load_model"):
+                model, tokenizer = load_model(args)
             print(f"Modeling implementation: {describe_model_impl(model)}", flush=True)
-            results = run_lm_eval(
-                model, tokenizer, tasks=args.tasks, batch_size=args.batch_size,
-                num_fewshot=0, limit=args.limit, seed=args.seed,
-                max_length=args.max_length, include_gsm8k=args.include_gsm8k,
-                max_batch_size=args.max_batch_size,
-            )
+            with ledger.component("evaluate_zeroshot"):
+                results = run_lm_eval(
+                    model, tokenizer, tasks=args.tasks, batch_size=args.batch_size,
+                    num_fewshot=0, limit=args.limit, seed=args.seed,
+                    max_length=args.max_length, include_gsm8k=args.include_gsm8k,
+                    max_batch_size=args.max_batch_size,
+                )
             elapsed = perf_counter() - start
             print(f"Evaluation complete in {elapsed:.2f} seconds", flush=True)
             if output is None:

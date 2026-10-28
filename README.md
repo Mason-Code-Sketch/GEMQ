@@ -175,3 +175,29 @@ python -m gemq.eval_zeroshot --model_path /absolute/path/to/checkpoint \
 Use `--layer-devices cuda:0 cuda:1` (or more visible devices) when the resident
 decoded model does not fit on one GPU. Explicit `cached` and Triton settings
 remain available; checkpoint files are unchanged.
+
+### Stage resource records
+
+The existing `ResourceLedger` is enabled by default for statistics, allocation,
+quantization/Router FT and seven-task entry points. `--resource_output` still
+selects an explicit path. Otherwise statistics use `<statistics-file>.resource.json`,
+allocation uses `<allocation-stem>.resource.json`, quantization uses
+`<save_path>/resource_breakdown.json` (or `results/resource-records/<model>/`
+without a checkpoint path), and seven-task evaluation uses
+`<output-stem>.resources.json`. Console records retain the `[resources]` prefix.
+
+Components record CUDA-synchronized elapsed seconds, per-GPU PyTorch peak reserved
+memory in GiB and process-tree RSS sampled every second. Core totals and shares
+cover `comp_grad`, `comp_stats`, `solve_lp`, `quant_gptq` and `ft_routers`; model/data
+loading, checkpoint I/O, PPL and seven-task evaluation remain separate. The sum
+of per-GPU peaks is an upper bound because peaks need not coincide. Driver and
+non-PyTorch allocations are excluded; summed process RSS can double-count shared
+pages. Measurement errors are explicit, so missing samples are not zero usage.
+
+Each attempt gets a `run_id`; rerunning archives its previous JSON and starts
+fresh. Failures retain completed component records and the original exception.
+Hard-killed runs can retain `running` and `active_component`. `merge_ledgers`
+deduplicates run IDs, including previously merged inputs, and marks missing or
+failed sources incomplete. Keep evaluation records separate when comparing the
+five core phases with Table 4; compare hardware and protocol settings explicitly.
+Historical resource values are not backfilled.

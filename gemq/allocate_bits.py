@@ -99,7 +99,8 @@ def validate_effective_bpe(opt_set, model_info, target_bpe, shared_bit):
     print(f"Validated effective expert budget: {effective_bpe:.6g} bpe")
 
 
-def run_gemq_solver(args):
+def run_gemq_solver(args, resource_ledger=None):
+    ledger = resource_ledger or ResourceLedger(None)
     # parse info
     m = get_model_info(args.model_name)
     bpe = args.bit_budget
@@ -109,22 +110,37 @@ def run_gemq_solver(args):
 
     # build a solver and solve
     fixed_expert_bits = get_fixed_shared_expert_bits(m, bit_cands)
-    global_solver = GEMQSolver(
-        layer_re_path=args.layer_re_path,
-        x_space=bit_cands,
-        extra_constr=args.extra_constr, # NOTE: this args is valid only when using x_space=(1,2,3)
-        start_layer_idx=m.first_k_dense_layers,
-        backend=args.ilp_backend,
-        fixed_expert_bits=fixed_expert_bits,
-    )
-    validate_scored_expert_count(m, global_solver.num_experts)
-    opt_set = global_solver.solve_all(total_bits=total_bits)
+    with ledger.component("load_statistics"):
+        global_solver = GEMQSolver(
+            layer_re_path=args.layer_re_path,
+            x_space=bit_cands,
+            extra_constr=args.extra_constr, # NOTE: this args is valid only when using x_space=(1,2,3)
+            start_layer_idx=m.first_k_dense_layers,
+            backend=args.ilp_backend,
+            fixed_expert_bits=fixed_expert_bits,
+        )
+        validate_scored_expert_count(m, global_solver.num_experts)
+    with ledger.component("solve_lp"):
+        opt_set = global_solver.solve_all(total_bits=total_bits)
     if fixed_expert_bits:
         validate_effective_bpe(
             opt_set, m, bpe, shared_bit=next(iter(fixed_expert_bits.values()))
         )
 
+    save_path = allocation_output_path(args)
+
+    # save results
+    with ledger.component("save_allocation"):
+        os.makedirs(osp.dirname(save_path), exist_ok=True)
+        with open(save_path, "wb") as f:
+            pickle.dump(opt_set, f)
+        print("Bit config file saved to:", save_path)
+
+
+def allocation_output_path(args):
     # auto generate the save path if not specified
+    bpe = args.bit_budget
+    bit_cands = list(map(int, args.bit_candidates.split(",")))
     save_path = args.save_path
     if not save_path:
         bc_str = ",".join(map(str, bit_cands))
@@ -132,11 +148,7 @@ def run_gemq_solver(args):
         const_str = "" if args.extra_constr == "none" else f"_{args.extra_constr}"
         save_path = f"configs/{args.model_name}/GEMQ/{calib_str}_E{bpe:.1f}_B{bc_str}{const_str}{model_str}.pkl"
     
-    # save results
-    os.makedirs(osp.dirname(save_path), exist_ok=True)
-    with open(save_path, "wb") as f:
-        pickle.dump(opt_set, f)
-    print("Bit config file saved to:", save_path)
+    return save_path
 
 
 def parse_args():
@@ -185,11 +197,10 @@ if __name__ == "__main__":
     # parse args
     args = parse_args()
     print(json.dumps(vars(args), indent=4))
-    resource_ledger = ResourceLedger(args.resource_output)
+    resource_ledger = ResourceLedger(args.resource_output or allocation_output_path(args).removesuffix(".pkl") + ".resource.json")
 
     with resource_ledger.command():
         if args.ilp_solver == "gemq":
-            with resource_ledger.component("solve_lp"):
-                run_gemq_solver(args)
+            run_gemq_solver(args, resource_ledger)
         else:
             raise ValueError(f"Unknown solver: {args.ilp_solver}")

@@ -20,6 +20,7 @@ dependencies = [
     "numpy>=2.2.6",
     "scipy>=1.9",
     "tqdm",
+    "psutil",
     "sentencepiece>=0.2.1",
     "protobuf>=6.32.1",
 ]

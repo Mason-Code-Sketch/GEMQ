@@ -123,6 +123,7 @@ class Qwen15AdaptationTest(unittest.TestCase):
         model = _LoadedModel()
         args = SimpleNamespace(
             resource_output="",
+            layer_grads_path="",
             model="unused",
             use_fast=False,
             mode="layer_grads",
@@ -170,6 +171,7 @@ class Qwen15AdaptationTest(unittest.TestCase):
                 "compute_layer_grads",
                 side_effect=record_gradients,
             ),
+            patch.object(compute_model_stats, "ResourceLedger", return_value=compute_model_stats.ResourceLedger(None)),
         ):
             compute_model_stats.main(args)
 
