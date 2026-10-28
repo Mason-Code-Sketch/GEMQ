@@ -16,7 +16,7 @@ from gemq.quantizers.gptq import MCMoeGPTQWeightQuantizer, GPTQWeightQuantizer
 from gemq.utils.data_utils import get_calib_loader
 from gemq.utils.model_utils import *
 from gemq.utils.quant_utils import *
-from gemq.utils.eval_utils import evaluate_perplexity, run_lm_eval
+from gemq.utils.eval_utils import evaluate_perplexity
 from gemq.utils.hf_loading import (
     align_deepseek_softmax_scale,
     ensure_deepseek_v2_remote_code_compat,
@@ -29,6 +29,16 @@ from gemq.inference.qwen2_moe import (
 from gemq.resource_ledger import ResourceLedger
 
 logging.set_verbosity_error()
+
+
+def evaluate_saved_downstream(args):
+    """Run seven tasks from the final checkpoint using resident grouped experts."""
+    from gemq.eval_zeroshot import main as evaluate
+    return evaluate([
+        "--model_path", str(args.save_path), "--model_dtype", args.save_dtype,
+        "--backend", "grouped_cached", "--tasks", *args.downstream_tasks.split(","),
+        "--batch_size", str(args.lm_eval_batchsize), "--seed", str(args.seed),
+    ])
 
 
 def make_gptq_quantizer(weight, name, wbits, args):
@@ -598,7 +608,7 @@ def parse_args():
         help="Percent of the average Hessian diagonal to use for dampening"
     )
     parser.add_argument(
-        "--mse", action="store_true",
+        "--mse", action=argparse.BooleanOptionalAction, default=True,
         help="Whether to seach for quantization parameters (range)"
     )
     parser.add_argument(
@@ -611,7 +621,7 @@ def parse_args():
     )
     parser.add_argument(
         "--reproduce_mcmoe", action="store_true",
-        help="Whether to use the GPTQ implementation from MC-MoE"
+        help="Use MC-MoE native parameter precision with the aligned GPTQ rules"
     )
 
     # router fine-tuning args
@@ -686,6 +696,10 @@ def parse_args():
 if __name__ == "__main__":
     # parse args
     args = parse_args()
+    if args.eval_downstream and (not args.save_path or not args.real_quant):
+        raise ValueError("Seven-task evaluation requires a saved final packed checkpoint")
+    if args.eval_downstream and args.num_fewshot != 0:
+        raise ValueError("The aligned seven-task protocol requires zero-shot evaluation")
     print(json.dumps(vars(args), indent=4))
     resource_ledger = ResourceLedger(args.resource_output)
 
@@ -764,19 +778,6 @@ if __name__ == "__main__":
                     offload=False,
                     dataset_root=args.dataset_root,
                 )
-                if args.eval_downstream:
-                    if args.disable_cache:
-                        model.config.use_cache = False
-                    try:
-                        run_lm_eval(
-                            model,
-                            tokenizer,
-                            tasks=args.downstream_tasks.split(","),
-                            batch_size=args.lm_eval_batchsize,
-                            num_fewshot=args.num_fewshot,
-                        )
-                    except Exception:
-                        print("Downstream evaluation failed. Skipping ...")
         else:
             with resource_ledger.component("evaluation"):
                 evaluate_perplexity(
@@ -842,3 +843,12 @@ if __name__ == "__main__":
                     args.real_quant,
                 )
                 print("Quantized model saved to:", args.save_path)
+
+        if args.eval_downstream:
+            # Reload exactly the saved final model, including its trained routers.
+            quant_modules.clear()
+            qwen2_packed_states.clear()
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+            evaluate_saved_downstream(args)

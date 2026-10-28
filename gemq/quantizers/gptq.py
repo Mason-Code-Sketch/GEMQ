@@ -5,9 +5,11 @@ import torch.nn as nn
 
 
 class MCMoeGPTQWeightQuantizer(nn.Module):
+    """Aligned GPTQ retaining native MC-MoE parameter arithmetic precision."""
+
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
-        groupsize=-1, actorder=False, static_groups=False, mse=False,
+        groupsize=-1, actorder=False, static_groups=False, mse=True,
     ):
         super().__init__()
 
@@ -76,13 +78,9 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         if self.mse:
             norm = 2.4
 
-            tau_range = 0.1
-            tau_n = 50
-            p_left  = 1 - tau_range
-            p_right = 1 + tau_range
-
-            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=self.W.dtype)  # (N_filters,)
-            for _, p in enumerate(torch.cat([torch.ones(1), torch.linspace(1.0, p_right, tau_n+1)[1:], torch.linspace(1.0, p_left, tau_n+1)[1:]])):
+            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=self.W.dtype)
+            for index in range(80):
+                p = 1 - index / 100
                 minv = p * min_val
                 maxv = p * max_val
 
@@ -103,6 +101,9 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
                     scales[tmp] = tmp_scales[tmp]
                     zeros[tmp] = tmp_zeros[tmp]
 
+        empty = (x == 0).all(dim=1)
+        scales[empty] = 1
+        zeros[empty] = 0
         return scales, zeros, max_int
 
     @staticmethod
@@ -136,9 +137,6 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         W = self.W.float()  # (n_fltd, n_dim)
         H = self.H          # (n_dim, n_dim)
 
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
-        W[:, dead] = 0
 
         assert not self.static_groups
         if self.static_groups:
@@ -151,13 +149,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        damp = self.percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=device)
-        H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
+        from gemq.quantizers.hessian import inverse_hessian_factor
+        Hinv = inverse_hessian_factor(H, self.percdamp)
 
         # initialize quantization params (assuming groupsize < 0)
         scales, zeros, max_int = self.find_params(W)
@@ -169,19 +162,6 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             count = i2 - i1
 
             W1 = W[:, i1:i2].clone()
-            if self.nbits in (1, 2, 3) and self.groupsize == self.blocksize:
-                # MC-MoE has no in-block compensation at low bits. With one
-                # group per block, all columns share fixed quantization params.
-                scales, zeros, max_int = self.find_params(W1)
-                scales_list.append(scales)
-                zeros_list.append(zeros)
-                Q1 = self.quantize_vector(W1, scales, zeros, max_int)
-                qr = (Q1 - zeros) * scales
-                Err1 = (W1 - qr) / Hinv.diagonal()[i1:i2].unsqueeze(0)
-                Q[:, i1:i2] = Q1
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-                continue
-
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
@@ -211,8 +191,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
                 Losses1[:, i] = (w - qr) ** 2 / d ** 2
                 err1 = (w - qr) / d
                 
-                if self.nbits > 3:
-                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
 
                 Err1[:, i] = err1
             
@@ -243,9 +222,11 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
 
 
 class GPTQWeightQuantizer(nn.Module):
+    """Aligned floating-zero GPTQ retaining native FP32 parameter solving."""
+
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
-        groupsize=-1, actorder=False, static_groups=False, mse=False,
+        groupsize=-1, actorder=False, static_groups=False, mse=True,
     ):
         super().__init__()
 
@@ -307,7 +288,7 @@ class GPTQWeightQuantizer(nn.Module):
         max_val[tmp] =  1
 
         scales = (max_val - min_val).clamp(min=1e-5) / max_int  # (N_filter,1)
-        zeros = torch.round(-min_val / scales)  # (N_filter,1)
+        zeros = -min_val / scales  # (N_filter,1)
 
         if self.mse:
             grid = 100
@@ -321,7 +302,7 @@ class GPTQWeightQuantizer(nn.Module):
                 maxv = p * max_val
 
                 tmp_scales = (maxv - minv) / max_int
-                tmp_zeros = torch.round(-minv / tmp_scales)
+                tmp_zeros = -minv / tmp_scales
 
                 q = self.quantize_vector(x, tmp_scales, tmp_zeros, max_int)
                 q = (q - tmp_zeros) * tmp_scales # dequantize
@@ -337,6 +318,9 @@ class GPTQWeightQuantizer(nn.Module):
                     scales[tmp] = tmp_scales[tmp]
                     zeros[tmp] = tmp_zeros[tmp]
 
+        empty = (x == 0).all(dim=1)
+        scales[empty] = 1
+        zeros[empty] = 0
         return scales, zeros, max_int
 
     @staticmethod
@@ -348,7 +332,7 @@ class GPTQWeightQuantizer(nn.Module):
         if max_int == 1:
             x = torch.where(x >= 0, 1, 0)
         else:
-            x = torch.clamp(torch.round(x / scales) + zeros, 0, max_int)
+            x = torch.clamp(torch.round(x / scales + zeros), 0, max_int)
 
         return x
 
@@ -369,9 +353,6 @@ class GPTQWeightQuantizer(nn.Module):
         W = self.W.float()  # (n_fltd, n_dim)
         H = self.H          # (n_dim, n_dim)
 
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
-        W[:, dead] = 0
         
         assert not self.static_groups
         if self.static_groups:
@@ -384,13 +365,8 @@ class GPTQWeightQuantizer(nn.Module):
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        damp = self.percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=device)
-        H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
+        from gemq.quantizers.hessian import inverse_hessian_factor
+        Hinv = inverse_hessian_factor(H, self.percdamp)
 
         # initialize quantization params (assuming groupsize < 0)
         scales, zeros, max_int = self.find_params(W)

@@ -58,7 +58,7 @@ def parse_args(argv=None):
                              "over the listed CUDA devices and cache decoded weights")
     parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "grouped_cached", "triton"), default="auto",
-                        help="auto caches packed Qwen3 FP16 weights or any supported --layer-devices model; "
+                        help="auto selects resident grouped_mm for the four supported FP16/BF16 MoE families; "
                              "triton explicitly requests GEMQ fused kernels")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default=1)
@@ -141,19 +141,24 @@ def load_model(args):
 
 @torch.inference_mode()
 def prepare_backend(model, tokenizer, args):
+    grouped_supported = (
+        not args.is_fp and args.model_dtype in ("float16", "bfloat16")
+        and args.device.startswith("cuda")
+        and model.config.model_type in ("qwen3_moe", "qwen2_moe", "mixtral", "deepseek_v2")
+    )
     supported = (
         not args.is_fp and model.config.model_type == "qwen3_moe"
         and args.device.startswith("cuda") and args.model_dtype == "float16"
     )
     layerwise = bool(args.layer_devices)
-    if args.backend == "grouped_cached":
-        supported = (not args.is_fp and args.model_dtype in ("float16", "bfloat16")
-                     and args.device.startswith("cuda")
-                     and model.config.model_type in ("qwen3_moe", "qwen2_moe", "mixtral", "deepseek_v2"))
-    elif supported:
-        experts = [layer.mlp.experts for layer in model.model.layers if hasattr(layer.mlp, "experts")]
-        supported = bool(experts) and all(isinstance(group, torch.nn.ModuleList) for group in experts)
-    backend = ("cached" if supported or layerwise else "pytorch") if args.backend == "auto" else args.backend
+    if args.backend == "grouped_cached" or (args.backend == "auto" and grouped_supported):
+        supported = grouped_supported
+        backend = "grouped_cached"
+    else:
+        if supported:
+            experts = [layer.mlp.experts for layer in model.model.layers if hasattr(layer.mlp, "experts")]
+            supported = bool(experts) and all(isinstance(group, torch.nn.ModuleList) for group in experts)
+        backend = ("cached" if supported or layerwise else "pytorch") if args.backend == "auto" else args.backend
     if backend == "pytorch":
         return backend
     if not supported and not layerwise:

@@ -71,10 +71,11 @@ def test_entry_loads_supported_models_on_cpu_then_distributes(monkeypatch, model
 
 @pytest.mark.parametrize("model_type", ["deepseek_v2", "qwen2_moe", "qwen3_moe", "mixtral"])
 @pytest.mark.parametrize("offset", [0.0, 1.0])
-def test_layerwise_cache_checks_each_model_and_synchronizes_devices(monkeypatch, model_type, offset):
+@pytest.mark.parametrize("backend", ["auto", "cached"])
+def test_layerwise_cache_checks_each_model_and_synchronizes_devices(monkeypatch, model_type, offset, backend):
     import torch
     from gemq import eval_zeroshot as entry
-    from gemq.inference import cached_linear
+    from gemq.inference import cached_linear, grouped_cached
 
     class Model(torch.nn.Module):
         def __init__(self):
@@ -95,15 +96,18 @@ def test_layerwise_cache_checks_each_model_and_synchronizes_devices(monkeypatch,
     tokenizer = Mock(return_value=SimpleNamespace(input_ids=torch.tensor([[1, 2, 3]])))
     cache = Mock(side_effect=lambda model: setattr(model, "offset", offset))
     synchronize = Mock()
+    install_grouped = Mock()
+    monkeypatch.setattr(grouped_cached, "install_grouped_cached", install_grouped)
     monkeypatch.setattr(cached_linear, "cache_quantized_linears", cache)
     monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
-    args = entry.parse_args(["--model_path", "/unused", "--layer-devices", "cuda:1", "cuda:3"])
+    args = entry.parse_args(["--model_path", "/unused", "--layer-devices", "cuda:1", "cuda:3", "--backend", backend])
     if offset:
         with pytest.raises(RuntimeError, match="numerical check|preserve packed logits"):
             entry.prepare_backend(model, tokenizer, args)
     else:
-        assert entry.prepare_backend(model, tokenizer, args) == "cached"
+        assert entry.prepare_backend(model, tokenizer, args) == ("grouped_cached" if backend == "auto" else "cached")
     cache.assert_called_once_with(model)
+    assert install_grouped.call_count == int(backend == "auto")
     assert {call.args[0] for call in synchronize.call_args_list} == {"cuda:1", "cuda:3"}
 
 

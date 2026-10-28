@@ -9,13 +9,8 @@ from gemq.quantizers.gptq import MCMoeGPTQWeightQuantizer
 def _columnwise(quantizer):
     weight = quantizer.W.float().clone()
     hessian = quantizer.H.clone()
-    dead = hessian.diagonal() == 0
-    hessian[dead, dead] = 1
-    weight[:, dead] = 0
-    diagonal = torch.arange(weight.shape[1], device=weight.device)
-    hessian[diagonal, diagonal] += quantizer.percdamp * hessian.diagonal().mean()
-    inverse = torch.cholesky_inverse(torch.linalg.cholesky(hessian))
-    factor = torch.linalg.cholesky(inverse, upper=True)
+    from gemq.quantizers.hessian import inverse_hessian_factor
+    factor = inverse_hessian_factor(hessian, quantizer.percdamp)
     output = torch.zeros_like(weight)
     scales_list, zeros_list = [], []
     for start in range(0, weight.shape[1], quantizer.blocksize):
@@ -36,10 +31,9 @@ def _columnwise(quantizer):
             )
             restored = ((levels - zeros) * scales).flatten()
             error = (values - restored) / factor[column, column]
-            if quantizer.nbits > 3:
-                block[:, offset:] -= error.unsqueeze(1) @ factor[
-                    column, column:end
-                ].unsqueeze(0)
+            block[:, offset:] -= error.unsqueeze(1) @ factor[
+                column, column:end
+            ].unsqueeze(0)
             output[:, column] = levels.flatten()
             errors[:, offset] = error
         weight[:, end:] -= errors @ factor[start:end, end:]
