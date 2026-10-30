@@ -10,6 +10,7 @@ from tqdm import tqdm
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, logging
+from transformers.dynamic_module_utils import custom_object_save
 from hqq.models.hf.base import AutoHQQHFModel
 
 from gemq.quantizers.gptq import MCMoeGPTQWeightQuantizer, GPTQWeightQuantizer
@@ -179,6 +180,8 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
     if real_quant:
         tokenizer.save_pretrained(save_path)
         AutoHQQHFModel.save_quantized(model, save_path)
+        if type(model).__module__.startswith("transformers_modules."):
+            custom_object_save(model, save_path)
     else:
         dtype = torch.float16 if save_dtype == "float16" else torch.bfloat16
         model = model.to(dtype)
