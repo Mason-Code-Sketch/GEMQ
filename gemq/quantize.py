@@ -74,6 +74,7 @@ def make_gptq_quantizer(weight, name, wbits, args):
         args.actorder,
         args.static_groups,
         args.mse,
+        mcmoe_rules=NAME_TO_MODEL[args.model_name] == ModelType.MIXTRAL,
     )
 
 
@@ -625,7 +626,7 @@ def parse_args():
     )
     parser.add_argument(
         "--reproduce_mcmoe", action="store_true",
-        help="Use MC-MoE native parameter precision with the aligned GPTQ rules"
+        help="Use MC-MoE native parameter precision; Mixtral restores MC-MoE search and low-bit compensation rules"
     )
 
     # router fine-tuning args

@@ -31,9 +31,10 @@ def _columnwise(quantizer):
             )
             restored = ((levels - zeros) * scales).flatten()
             error = (values - restored) / factor[column, column]
-            block[:, offset:] -= error.unsqueeze(1) @ factor[
-                column, column:end
-            ].unsqueeze(0)
+            if not quantizer.mcmoe_rules or quantizer.nbits > 3:
+                block[:, offset:] -= error.unsqueeze(1) @ factor[
+                    column, column:end
+                ].unsqueeze(0)
             output[:, column] = levels.flatten()
             errors[:, offset] = error
         weight[:, end:] -= errors @ factor[start:end, end:]
