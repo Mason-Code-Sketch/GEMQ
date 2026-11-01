@@ -6,12 +6,23 @@ import torch.nn as nn
 from gemq.quantizers.hessian import inverse_hessian_factor
 
 
+def _search_factors(x, mcmoe_rules):
+    """Select only the search range; retain each solver's arithmetic precision."""
+    if mcmoe_rules:
+        return torch.cat((
+            torch.ones(1, device=x.device, dtype=x.dtype),
+            torch.linspace(1.0, 1.1, 51, device=x.device, dtype=x.dtype)[1:],
+            torch.linspace(1.0, 0.9, 51, device=x.device, dtype=x.dtype)[1:],
+        ))
+    return [1 - index / 100 for index in range(80)]
+
+
 class MCMoeGPTQWeightQuantizer(nn.Module):
     """Aligned GPTQ retaining native MC-MoE parameter arithmetic precision."""
 
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
-        groupsize=-1, actorder=False, static_groups=False, mse=True,
+        groupsize=-1, actorder=False, static_groups=False, mse=True, mcmoe_rules=False,
     ):
         super().__init__()
 
@@ -31,6 +42,9 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         self.percdamp = percdamp
         self.actorder = actorder
         self.static_groups = static_groups
+        if not isinstance(mcmoe_rules, bool):
+            raise ValueError("mcmoe_rules must be boolean")
+        self.mcmoe_rules = mcmoe_rules
         self.mse = mse
 
         # init
@@ -89,8 +103,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             norm = 2.4
 
             best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=self.W.dtype)
-            for index in range(80):
-                p = 1 - index / 100
+            factors = _search_factors(x, self.mcmoe_rules)
+            for p in factors:
                 minv = p * min_val
                 maxv = p * max_val
 
@@ -192,7 +206,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
                 Losses1[:, i] = (w - qr) ** 2 / d ** 2
                 err1 = (w - qr) / d
                 
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                if not self.mcmoe_rules or self.nbits > 3:
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
 
                 Err1[:, i] = err1
             
@@ -224,7 +239,7 @@ class GPTQWeightQuantizer(nn.Module):
 
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
-        groupsize=-1, actorder=False, static_groups=False, mse=True,
+        groupsize=-1, actorder=False, static_groups=False, mse=True, mcmoe_rules=False,
     ):
         super().__init__()
 
@@ -242,6 +257,9 @@ class GPTQWeightQuantizer(nn.Module):
         self.percdamp = percdamp
         self.actorder = actorder
         self.static_groups = static_groups
+        if not isinstance(mcmoe_rules, bool):
+            raise ValueError("mcmoe_rules must be boolean")
+        self.mcmoe_rules = mcmoe_rules
         self.mse = mse
 
         # init
@@ -300,8 +318,8 @@ class GPTQWeightQuantizer(nn.Module):
             norm = 2.4
 
             best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=x.dtype)
-            for i in range(int(maxshrink * grid)):
-                p = 1 - i / grid 
+            factors = _search_factors(x, self.mcmoe_rules)
+            for p in factors:
                 minv = p * min_val
                 maxv = p * max_val
 
@@ -396,7 +414,8 @@ class GPTQWeightQuantizer(nn.Module):
                 Q1[:, i] = q
                 Losses1[:, i] = (w - qr) ** 2 / d ** 2
                 err1 = (w - qr) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                if not self.mcmoe_rules or self.nbits > 3:
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
