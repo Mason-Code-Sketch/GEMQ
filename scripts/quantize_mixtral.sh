@@ -23,7 +23,11 @@ seqlen=2048
 quantizer="gptq"
 bpe=2.0                    # bits per expert
 mixed_prec=true            # enable expert-level mixed-precision quantization (set false for uniform quantization)
-bit_cfg="configs/${model_name}/GEMQ/C4-Seed0_E${bpe}_B1,2,3_c2c3.pkl"
+constraint_suffix="_c2c3"
+if [[ "$bpe" == "1.25" ]]; then
+    constraint_suffix=""
+fi
+bit_cfg="configs/${model_name}/GEMQ/C4-Seed0_E${bpe}_B1,2,3${constraint_suffix}.pkl"
 
 # ===============================
 #  Router fine-tuning
