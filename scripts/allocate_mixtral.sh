@@ -11,6 +11,9 @@ wbits="1,2,3"        # candidate bit-widths
 ilp_solver="gemq"    # bit allocation method
 ilp_backend="highs"  # ILP solver: "highs" (bundled with scipy) or "gurobi"
 extra_constr="c2c3"  # extra constraints for bit allocation
+if [[ "$bits_per_expert" == "1.25" ]]; then
+    extra_constr="none"  # 8 experts cannot retain both 2-bit and 3-bit at 1.25 bpe.
+fi
 # path to the weighted layer reconstruction errors (i.e., ILP coefficients)
 layer_re_path="cache/${model_name}/LayerRE_c4-N128-L2048-Seed0_B1,2,3_faster.pkl"
 
