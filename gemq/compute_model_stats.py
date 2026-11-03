@@ -27,7 +27,7 @@ from gemq.utils.hf_loading import (
 from gemq.resource_ledger import ResourceLedger
 from gemq.utils.activation_checkpoint import checkpoint_attention
 from gemq.utils.moe_reconstruction import Qwen3MoeReconstructionCache
-from gemq.utils.fused_reconstruction import streamed_fused_reconstruction_scores
+from gemq.utils.fused_reconstruction import cross_expert_reconstruction_scores
 
 logging.set_verbosity_error()
 
@@ -658,10 +658,13 @@ def compute_faster_layer_re(model, dataloader, args):
             if (model_type == ModelType.QWEN3MOE
                     and getattr(moe_block.experts.config, "_experts_implementation", None)
                     == "grouped_mm"):
-                quant_loss[i] = streamed_fused_reconstruction_scores(
+                scratch_dir = osp.dirname(args.layer_re_path) or "."
+                os.makedirs(scratch_dir, exist_ok=True)
+                quant_loss[i] = cross_expert_reconstruction_scores(
                     moe_block, block_inps, block_outs,
                     layer_output_grads[i].squeeze(1), bit_cfg, fwd_bsz,
                     MCMoeRTNWeightQuantizer,
+                    scratch_dir=scratch_dir,
                     progress=lambda done, total: print(
                         f"LayerRE layer={i} experts={done}/{total}", flush=True
                     ) if done % 16 == 0 or done == total else None,
