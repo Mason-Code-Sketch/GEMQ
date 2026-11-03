@@ -14,9 +14,22 @@ import contextlib
 import math
 import os
 
+import psutil
+
 import torch
 import transformers
 
+
+
+
+def layer_grads_max_memory(gpu_weight_budget_gib):
+    """Keep overflow weights in CPU memory instead of implicit disk offload."""
+    if gpu_weight_budget_gib is None:
+        return None
+    if gpu_weight_budget_gib <= 0:
+        raise ValueError("GPU weight budget must be positive")
+    return {0: gpu_weight_budget_gib * 1024**3,
+            "cpu": psutil.virtual_memory().available}
 
 
 @contextlib.contextmanager

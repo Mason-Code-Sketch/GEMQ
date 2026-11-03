@@ -50,3 +50,14 @@ def test_real_loader_weights_outputs_and_gradients(tmp_path):
             assert b.grad is None, name
         else:
             assert torch.equal(a.grad, b.grad), name
+
+
+def test_gpu_budget_retains_explicit_cpu_destination():
+    from types import SimpleNamespace
+    from gemq.utils.hf_loading import layer_grads_max_memory
+    with patch("gemq.utils.hf_loading.psutil.virtual_memory",
+               return_value=SimpleNamespace(available=76 * 1024**3)):
+        assert layer_grads_max_memory(40) == {0: 40 * 1024**3, "cpu": 76 * 1024**3}
+        assert layer_grads_max_memory(None) is None
+    with pytest.raises(ValueError):
+        layer_grads_max_memory(0)

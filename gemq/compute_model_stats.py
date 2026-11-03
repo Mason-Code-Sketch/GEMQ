@@ -20,6 +20,7 @@ from gemq.utils.model_utils import *
 from gemq.quantizers.rtn import MCMoeRTNWeightQuantizer
 from gemq.utils.hf_loading import (
     sequential_weight_loading,
+    layer_grads_max_memory,
     align_deepseek_softmax_scale,
     ensure_deepseek_v2_remote_code_compat,
 )
@@ -883,11 +884,8 @@ def main(args) -> None:
             model = AutoModelForCausalLM.from_pretrained(
                 args.model,
                 device_map=("auto" if args.mode == "layer_grads" else "cpu"),
-                max_memory=(
-                    {0: args.layer_grads_gpu_memory_gib * 1024**3}
-                    if args.mode == "layer_grads" and args.layer_grads_gpu_memory_gib is not None
-                    else None
-                ),
+                max_memory=(layer_grads_max_memory(args.layer_grads_gpu_memory_gib)
+                            if args.mode == "layer_grads" else None),
                 torch_dtype=args.model_dtype,
                 attn_implementation=args.attn_impl,
                 trust_remote_code=True,
