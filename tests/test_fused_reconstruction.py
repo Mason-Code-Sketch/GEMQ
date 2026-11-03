@@ -170,3 +170,77 @@ def test_disk_pages_do_not_accumulate(tmp_path):
         assert resident_pages() == 0
     finally:
         storage.close()
+
+
+@torch.inference_mode()
+def test_batched_reads_preserve_order_duplicates_and_short_reads(tmp_path):
+    storage = DiskContributions(tmp_path, (1, 16, 2, 128), torch.float32)
+    try:
+        expected = torch.arange(16 * 2 * 128, dtype=torch.float32).reshape(16, 2, 128)
+        storage.tensor[0].copy_(expected)
+        storage.mapping.flush()
+        native_read = storage.os.preadv
+        def short_read(fd, buffers, offset):
+            view = buffers[0]
+            return native_read(fd, [view[:max(1, len(view) // 2)]], offset)
+        rows = torch.tensor([15, 0, 15, 7, 1, 4, 6, 9, 2, 3, 5])
+        with patch.object(storage.os, 'preadv', side_effect=short_read):
+            actual = storage.read_rows(0, rows, 'cpu')
+        assert torch.equal(actual, expected[rows])
+        assert storage.read_rows(0, torch.tensor([], dtype=torch.long), 'cpu').shape == (0, 2, 128)
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize('bit', [1, 2, 3])
+@torch.inference_mode()
+def test_batched_rtn_groups_match_original(dtype, bit):
+    from gemq.utils.fused_reconstruction import _quantize_candidate
+    torch.manual_seed(13)
+    weight = torch.randn(35, 768, dtype=dtype)
+    weight[0].zero_()
+    weight[1].fill_(.25)
+    weight[2].fill_(-.25)
+    expected = MCMoeRTNWeightQuantizer(weight, nbits=bit).quantize()
+    actual = _quantize_candidate(weight, bit, MCMoeRTNWeightQuantizer)
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize('normalize', [False, True])
+@pytest.mark.parametrize('tile_samples', [1, 2])
+@torch.inference_mode()
+def test_workspace_scores_match_native_across_tile_boundaries(dtype, normalize, tile_samples):
+    block, x, y, gradients = fixture(dtype, normalize)
+    saved = [t.clone() for t in (x, y, gradients)]
+    before = {k: t.clone() for k, t in block.state_dict().items()}
+    expected = compute_fused_moe_layer_reconstruction_errors(
+        block, x, y, gradients.double().pow(2), [1, 2, 3], 1)
+    workspace = torch.empty((tile_samples, 16, 2, 128), dtype=dtype)
+    pointer = workspace.data_ptr()
+    actual = cross_expert_reconstruction_scores(block, x, y, gradients,
+        [1, 2, 3], 1, MCMoeRTNWeightQuantizer, workspace=workspace)
+    assert expected == actual
+    assert pointer == workspace.data_ptr()
+    assert all(torch.equal(t, saved_t) for t, saved_t in zip((x, y, gradients), saved))
+    assert all(torch.equal(t, block.state_dict()[k]) for k, t in before.items())
+
+
+@torch.inference_mode()
+def test_workspace_rejects_alias_and_keeps_weights_on_exception():
+    block, x, y, gradients = fixture()
+    with pytest.raises(ValueError, match='alias'):
+        cross_expert_reconstruction_scores(block, x, y, gradients,
+            [2], 1, MCMoeRTNWeightQuantizer, workspace=x)
+    before = {k: t.clone() for k, t in block.state_dict().items()}
+    calls = []
+    def quantizer(weight, nbits):
+        calls.append(nbits)
+        if len(calls) == 10:
+            raise RuntimeError('candidate failure')
+        return MCMoeRTNWeightQuantizer(weight, nbits=nbits)
+    with pytest.raises(RuntimeError, match='candidate failure'):
+        cross_expert_reconstruction_scores(block, x, y, gradients,
+            [2], 1, quantizer, workspace=torch.empty_like(x))
+    assert all(torch.equal(t, block.state_dict()[k]) for k, t in before.items())

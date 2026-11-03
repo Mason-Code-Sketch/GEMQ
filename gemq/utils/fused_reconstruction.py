@@ -56,7 +56,10 @@ class GroupedBatchContributions:
         down = self.linear(mid, experts.down_proj, self.offsets)
         if bounded_workspace:
             del mid
-        self.contributions = down * self.routing[:, None]
+        # Reuse the completed down-projection buffer; the pointwise FP16/BF16/
+        # FP32 multiplication and its rounding are unchanged.
+        self.contributions = (down.mul_(self.routing[:, None]) if bounded_workspace
+                              else down * self.routing[:, None])
         if bounded_workspace:
             del down
         if "exact" not in metadata:
@@ -197,6 +200,8 @@ class DiskContributions:
         seq, top_k, hidden = self.shape[1:]
         row_bytes = top_k * hidden * self.item_bytes
         selected = torch.empty((len(rows), top_k, hidden), dtype=self.tensor.dtype)
+        if not len(rows):
+            return selected.to(device)
         raw = memoryview(selected.view(torch.uint8).numpy()).cast("B")
         def read_row(pair):
             target, row = pair
@@ -223,10 +228,26 @@ class DiskContributions:
 
 
 @torch.inference_mode()
+def _quantize_candidate(weight, bit, quantizer):
+    """Batch independent RTN column groups; preserve each 128-value reduction."""
+    from gemq.quantizers.rtn import MCMoeRTNWeightQuantizer
+    operation = quantizer(weight, nbits=bit)
+    if (type(operation) is MCMoeRTNWeightQuantizer and weight.ndim == 2
+            and operation.blocksize == 128 and weight.shape[1] % 128 == 0):
+        shape = weight.shape
+        operation.x = operation.x.reshape(-1, 128)
+        return operation.quantize().reshape(shape)
+    return operation.quantize()
+
+
+@torch.inference_mode()
 def cross_expert_reconstruction_scores(block, inputs, reference, gradients,
                                        bit_cfg, batch_size, quantizer,
-                                       progress=None, scratch_dir=None):
-    """Reuse exact baseline outputs across experts without retaining them in RAM."""
+                                       progress=None, scratch_dir=None, workspace=None):
+    """Reuse baseline outputs within an existing buffer, or bounded SSD storage."""
+    if workspace is not None and batch_size == 1:
+        return workspace_reconstruction_scores(block, inputs, reference, gradients,
+            bit_cfg, quantizer, workspace, progress=progress)
     import mmap
     import os
     import shutil
@@ -275,7 +296,7 @@ def cross_expert_reconstruction_scores(block, inputs, reference, gradients,
         for expert_id in range(count):
             destinations = [experts.gate_up_proj[expert_id], experts.down_proj[expert_id]]
             originals = [p.detach().clone() for p in destinations]
-            candidates = {b: [quantizer(w, nbits=b).quantize() for w in originals]
+            candidates = {b: [_quantize_candidate(w, b, quantizer) for w in originals]
                           for b in bit_cfg}
             try:
                 for sample, meta in enumerate(metadata):
@@ -291,18 +312,17 @@ def cross_expert_reconstruction_scores(block, inputs, reference, gradients,
                     offsets = torch.zeros_like(meta["offsets"])
                     offsets[expert_id:] = end - start
                     updates = {}
-                    try:
-                        for b in bit_cfg:
-                            for dst, value in zip(destinations, candidates[b]):
-                                dst.copy_(value)
-                            up = _grouped_linear(hidden, experts.gate_up_proj, offsets)
-                            mid = experts._apply_gate(up)
-                            down = _grouped_linear(mid, experts.down_proj, offsets)
-                            updates[b] = down * meta["routing"][start:end, None]
-                            del up, mid, down
-                    finally:
-                        for dst, original in zip(destinations, originals):
-                            dst.copy_(original)
+                    # Keep the native number of groups and the selected group
+                    # index. Expanded candidate views have no weight allocation;
+                    # only that group's nonempty rows participate in grouped-MM.
+                    for b in bit_cfg:
+                        gate_up, down_weight = candidates[b]
+                        up = _grouped_linear(hidden, gate_up.unsqueeze(0).expand(count, -1, -1), offsets)
+                        mid = experts._apply_gate(up)
+                        down = _grouped_linear(mid, down_weight.unsqueeze(0).expand(count, -1, -1), offsets)
+                        updates[b] = down * meta["routing"][start:end, None]
+                        del up, mid, down
+                    del gate_up, down_weight
                     errors = {b: inputs.new_empty((end - start, inputs.shape[-1]), dtype=torch.float64)
                               for b in bit_cfg}
                     for begin in range(0, len(rows_cpu), 128):
@@ -334,4 +354,120 @@ def cross_expert_reconstruction_scores(block, inputs, reference, gradients,
                 progress(expert_id + 1, count)
     finally:
         storage.close()
+    return defaultdict(dict, losses)
+
+
+@torch.inference_mode()
+def workspace_reconstruction_scores(block, inputs, reference, gradients,
+                                    bit_cfg, quantizer, workspace, progress=None):
+    """Reuse the consumed decoder-input storage as a bounded baseline tile.
+
+    The caller must no longer need the contents of workspace. No additional
+    output cache is allocated. Each independent RTN candidate is recreated per
+    tile, while sample order and the full-layout FP64 reduction stay unchanged.
+    """
+    from transformers.integrations.moe import _grouped_linear
+    if (workspace.device != inputs.device or workspace.dtype != inputs.dtype
+            or not workspace.is_contiguous()):
+        raise ValueError("Scoring workspace must be contiguous and match inputs")
+    if workspace.untyped_storage().data_ptr() in {
+            t.untyped_storage().data_ptr() for t in (inputs, reference, gradients)}:
+        raise ValueError("Scoring workspace must not alias scoring inputs")
+    experts = block.experts
+    count = experts.gate_up_proj.shape[0]
+    metadata = [grouped_routing(block, inputs[i:i + 1]) for i in range(len(inputs))]
+    top_k = metadata[0]['top_k']
+    seq, hidden_dim = inputs.shape[1:]
+    sample_elements = seq * top_k * hidden_dim
+    tile_samples = min(len(inputs), workspace.numel() // sample_elements)
+    if tile_samples < 1:
+        return cross_expert_reconstruction_scores(block, inputs, reference,
+            gradients, bit_cfg, 1, quantizer, progress=progress)
+    cache_tensor = workspace.view(-1)[:tile_samples * sample_elements].view(
+        tile_samples, seq, top_k, hidden_dim)
+    losses = {e: {b: [] for b in bit_cfg} for e in range(count)}
+    for tile_start in range(0, len(inputs), tile_samples):
+        tile_end = min(tile_start + tile_samples, len(inputs))
+        for sample in range(tile_start, tile_end):
+            if (not torch.isfinite(gradients[sample]).all().item()
+                    or not torch.isfinite(reference[sample]).all().item()):
+                return streamed_fused_reconstruction_scores(block, inputs,
+                    reference, gradients, bit_cfg, 1, quantizer, progress)
+            cache = GroupedBatchContributions(block, inputs[sample:sample + 1],
+                reference[sample:sample + 1], metadata[sample], bounded_workspace=True)
+            if not cache.exact:
+                del cache
+                return streamed_fused_reconstruction_scores(block, inputs,
+                    reference, gradients, bit_cfg, 1, quantizer, progress)
+            for start in range(0, seq, 128):
+                end = min(start + 128, seq)
+                ordered = cache.contributions.index_select(
+                    0, cache.inverse[start * top_k:end * top_k])
+                cache_tensor[sample - tile_start, start:end].copy_(
+                    ordered.view(end - start, top_k, hidden_dim))
+                del ordered
+            metadata[sample]['rows_cpu'] = (metadata[sample]['perm'] // top_k).cpu()
+            del cache
+        for expert_id in range(count):
+            sample_losses = {b: [] for b in bit_cfg}
+            # Candidate views never overwrite the model. Retain only this
+            # expert's three candidates; RTN grouping is deterministic.
+            candidates = {b: [
+                _quantize_candidate(experts.gate_up_proj[expert_id], b, quantizer),
+                _quantize_candidate(experts.down_proj[expert_id], b, quantizer),
+            ] for b in bit_cfg}
+            for sample in range(tile_start, tile_end):
+                meta = metadata[sample]
+                start, end = meta['bounds'][expert_id:expert_id + 2]
+                if start == end:
+                    for b in bit_cfg:
+                        sample_losses[b].append(inputs.new_zeros(1, dtype=torch.float64))
+                    continue
+                rows_gpu = meta['perm'][start:end] // top_k
+                slots = meta['perm'][start:end] % top_k
+                rows_cpu = meta['rows_cpu'][start:end]
+                hidden = inputs[sample].index_select(0, rows_gpu)
+                offsets = torch.zeros_like(meta['offsets'])
+                offsets[expert_id:] = end - start
+                updates = {}
+                for b in bit_cfg:
+                    gate_up, down_weight = candidates[b]
+                    up = _grouped_linear(hidden, gate_up.unsqueeze(0).expand(count, -1, -1), offsets)
+                    mid = experts._apply_gate(up)
+                    down = _grouped_linear(mid, down_weight.unsqueeze(0).expand(count, -1, -1), offsets)
+                    updates[b] = down * meta['routing'][start:end, None]
+                    del up, mid, down
+                del gate_up, down_weight
+                errors = {b: inputs.new_empty((end - start, hidden_dim), dtype=torch.float64)
+                          for b in bit_cfg}
+                for begin in range(0, len(rows_gpu), 128):
+                    finish = min(begin + 128, len(rows_gpu))
+                    cpu_rows, gpu_rows = rows_cpu[begin:finish], rows_gpu[begin:finish]
+                    contributions = cache_tensor[sample - tile_start].index_select(0, gpu_rows)
+                    weight = gradients[sample].index_select(0, cpu_rows).to(inputs.device).double().pow(2)
+                    target = reference[sample].index_select(0, gpu_rows).double()
+                    local_rows = torch.arange(finish - begin, device=inputs.device)
+                    for b in bit_cfg:
+                        contributions[local_rows, slots[begin:finish]] = updates[b][begin:finish]
+                        output = contributions.sum(1)
+                        value = weight * (target - output.double()).pow(2)
+                        errors[b][begin:finish].copy_(value)
+                        del output, value
+                    del contributions, weight, target
+                full_error = inputs.new_zeros(inputs.shape[1:], dtype=torch.float64)
+                for b in bit_cfg:
+                    full_error.index_copy_(0, rows_gpu, errors[b])
+                    sample_losses[b].append(full_error.reshape(1, -1).sum(1))
+                del errors, full_error, updates, hidden
+            # Keep Python FP64 values in original sample order, not thousands
+            # of scalar CUDA tensors. Do not sum within a tile: the final
+            # Python reduction must see the original complete sample sequence.
+            for b in bit_cfg:
+                losses[expert_id][b].extend(torch.cat(sample_losses[b]).tolist())
+            del candidates, sample_losses
+        if progress is not None:
+            progress(tile_end * count, len(inputs) * count)
+    for expert_id in range(count):
+        for b in bit_cfg:
+            losses[expert_id][b] = sum(losses[expert_id][b])
     return defaultdict(dict, losses)

@@ -641,17 +641,44 @@ def compute_faster_layer_re(model, dataloader, args):
         named_linears = get_named_linears(layer)
         moe_block = get_moe_block(layer, model_name)
 
-        # get unquantized layer outputs and moe block in/outs
-        block_inps, block_outs = [], []
-        handle = moe_block.register_forward_hook(partial(get_inout_hook, inps=block_inps, outs=block_outs))
-        for start in range(0, num_samples, fwd_bsz):
-            batch_inps = inps[start:start + fwd_bsz]
-            outs[start:start + fwd_bsz] = get_decoder_hidden_states(
-                layer(batch_inps, **layer_kwargs), batch_inps.shape
-            )
-        block_inps = torch.cat(block_inps, dim=0)  # (num_samples, seqlen, hidden_size)
-        block_outs = torch.cat(block_outs, dim=0)  # (num_samples, seqlen, hidden_size)
-        handle.remove()
+        # Collect Qwen3 inputs/outputs directly into their final buffers. The
+        # former lists plus two torch.cat outputs briefly duplicated both full
+        # calibration tensors before their hook was removed.
+        use_qwen_workspace = (
+            model_type == ModelType.QWEN3MOE and has_fused_experts(moe_block)
+            and getattr(moe_block.experts.config, "_experts_implementation", None) == "grouped_mm"
+        )
+        if use_qwen_workspace:
+            block_inps, block_outs = torch.empty_like(inps), torch.empty_like(inps)
+            captured_samples = 0
+            def capture_into_buffers(module, values, result):
+                nonlocal captured_samples
+                x = values[0] if isinstance(values, (tuple, list)) else values
+                y = result[0] if isinstance(result, (tuple, list)) else result
+                end = captured_samples + len(x)
+                if end > num_samples or x.shape != y.shape:
+                    raise ValueError("Unexpected Qwen3 reconstruction capture shape")
+                block_inps[captured_samples:end].copy_(x)
+                block_outs[captured_samples:end].copy_(y)
+                captured_samples = end
+            handle = moe_block.register_forward_hook(capture_into_buffers)
+        else:
+            block_inps, block_outs = [], []
+            handle = moe_block.register_forward_hook(partial(get_inout_hook, inps=block_inps, outs=block_outs))
+        try:
+            for start in range(0, num_samples, fwd_bsz):
+                batch_inps = inps[start:start + fwd_bsz]
+                outs[start:start + fwd_bsz] = get_decoder_hidden_states(
+                    layer(batch_inps, **layer_kwargs), batch_inps.shape
+                )
+            if use_qwen_workspace:
+                if captured_samples != num_samples:
+                    raise ValueError("Incomplete Qwen3 reconstruction capture")
+            else:
+                block_inps = torch.cat(block_inps, dim=0)
+                block_outs = torch.cat(block_outs, dim=0)
+        finally:
+            handle.remove()
 
         if has_fused_experts(moe_block) and model_type != ModelType.MIXTRAL:
             bit_cfg = list(map(int, args.wbits.split(",")))
@@ -665,9 +692,14 @@ def compute_faster_layer_re(model, dataloader, args):
                     layer_output_grads[i].squeeze(1), bit_cfg, fwd_bsz,
                     MCMoeRTNWeightQuantizer,
                     scratch_dir=scratch_dir,
+                    # All decoder forwards are complete. The consumed input
+                    # buffer becomes the output buffer for the next layer, so
+                    # its contents may be reused during scoring without another
+                    # cache allocation or a larger working-memory budget.
+                    workspace=inps,
                     progress=lambda done, total: print(
-                        f"LayerRE layer={i} experts={done}/{total}", flush=True
-                    ) if done % 16 == 0 or done == total else None,
+                        f"LayerRE layer={i} expert_samples={done}/{total}", flush=True
+                    ),
                 )
             else:
                 layer_sq_grads = layer_output_grads[i].squeeze(1).double().pow(2).to("cuda")
@@ -676,6 +708,8 @@ def compute_faster_layer_re(model, dataloader, args):
                     bit_cfg, fwd_bsz,
                 )
                 del layer_sq_grads
+            if use_qwen_workspace:
+                del block_inps, block_outs, named_linears
             inps, outs = outs, inps
             layers[i] = layer.to("cpu")
             gc.collect()
