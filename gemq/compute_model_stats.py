@@ -18,7 +18,6 @@ from gemq.utils.data_utils import get_calib_loader
 from gemq.utils.model_utils import *
 from gemq.quantizers.rtn import MCMoeRTNWeightQuantizer
 from gemq.utils.hf_loading import (
-    sequential_weight_loading,
     align_deepseek_softmax_scale,
     ensure_deepseek_v2_remote_code_compat,
 )
@@ -699,7 +698,7 @@ def main(args) -> None:
     resource_output = args.resource_output or (osp.splitext(target)[0] + ".resource.json" if target else f"results/resource-records/{args.model_name}/{args.mode}.json")
     resource_ledger = ResourceLedger(resource_output)
     with resource_ledger.command():
-        with resource_ledger.component("load_model_and_tokenizer"), sequential_weight_loading():
+        with resource_ledger.component("load_model_and_tokenizer"):
             if args.model_name == "deepseek-ai/DeepSeek-V2-Lite":
                 ensure_deepseek_v2_remote_code_compat()
             tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=args.use_fast)

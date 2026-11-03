@@ -18,22 +18,6 @@ import torch
 import transformers
 
 
-
-@contextlib.contextmanager
-def sequential_weight_loading():
-    """Bound load-time materialization without changing weights or placement."""
-    key = "HF_DEACTIVATE_ASYNC_LOAD"
-    previous = os.environ.get(key)
-    os.environ[key] = "1"
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = previous
-
-
 def ensure_deepseek_v2_remote_code_compat():
     """Provide a removed Transformers utility required by DeepSeek-V2's remote code."""
     from transformers.utils import import_utils
