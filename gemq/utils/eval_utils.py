@@ -206,7 +206,7 @@ def summarize_lm_eval(results, tasks, include_gsm8k=False):
 def run_lm_eval(
     model, tokenizer, tasks=None, batch_size="auto", num_fewshot=0,
     limit=None, seed=0, max_length=None, include_gsm8k=False,
-    max_batch_size=64,
+    max_batch_size=57,
 ):
     from lm_eval import evaluator
     from lm_eval.models.huggingface import HFLM
