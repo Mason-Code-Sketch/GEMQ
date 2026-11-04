@@ -149,7 +149,7 @@ def dequant_gemm_kernel(
 
 def dequant_gemm_triton(
     x: Tensor, w_q: Tensor, scales: Tensor, zeros: Tensor,
-    nbits: int, group_size: int
+    nbits: int, group_size: int, *, autotune: bool = True
 ) -> Tensor:
     """
     Matmul with quantized weights: output = matmul(x, dequantize(w_q, scales, zeros))
@@ -175,7 +175,14 @@ def dequant_gemm_triton(
     # 1D grid
     grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),)
 
-    dequant_gemm_kernel[grid](
+    # Native routed experts encounter many distinct token counts in one forward.
+    # Avoid a fresh tuning sweep for every exact M when requested by that path.
+    kernel = dequant_gemm_kernel if autotune else dequant_gemm_kernel.fn
+    launch = {} if autotune else dict(
+        BLOCK_SIZE_M=32, BLOCK_SIZE_N=64, BLOCK_SIZE_K=32,
+        num_stages=2, num_warps=4,
+    )
+    kernel[grid](
         x, w_q, output,
         scales, zeros,
         M, N, K,
@@ -184,6 +191,7 @@ def dequant_gemm_triton(
         output.stride(0), output.stride(1),
         scales.stride(0), scales.stride(1),
         nbits, group_size,
+        **launch,
         # NOTE: comment out for autotune
         # BLOCK_SIZE_M=64,
         # BLOCK_SIZE_N=64,

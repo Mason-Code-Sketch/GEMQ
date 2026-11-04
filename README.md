@@ -70,6 +70,14 @@ Unused allocator caches are cleared at phase boundaries, not on every step.
 After packing equivalence is checked, references to the old floating-point
 modules are released before packed-model evaluation and checkpoint saving.
 
+Packed PPL uses `--packed_ppl_backend auto` by default: Qwen3 FP16 on CUDA
+uses the fused Triton expert path; other configurations use native HQQ.
+Use `--packed_ppl_backend pytorch` for the native HQQ reference. The fused
+path can introduce floating-point differences. Its native HQQ checkpoint is
+saved before inference-layout conversion so downstream loading retains the
+original checkpoint format. Expert GEMM uses a fixed existing kernel configuration
+to avoid repeated tuning for different routed token counts.
+
 LayerGrads freezes model parameters and differentiates through input activations.
 Output gradients are written to temporary file-backed tensors, then saved in the
 original `LayerGrads_*.pt` format. LayerRE memory-maps this checkpoint instead of

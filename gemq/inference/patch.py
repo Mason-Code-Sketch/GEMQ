@@ -130,6 +130,16 @@ def replace_moe_blocks(model, model_name, config, is_fp=False):
     def _replace_qwen3moe(layer, del_orig=True):
         org_block = layer.mlp
 
+        # Transformers 5 keeps routing in the native block and stores combined
+        # gate/up projections in one expert container. Preserve that interface.
+        if not is_fp:
+            from gemq.inference.fused_moe import HQQFusedMoeExperts
+            from gemq.inference.packed_fused import PackedFusedMoeExperts
+
+            if isinstance(org_block.experts, HQQFusedMoeExperts):
+                org_block.experts = PackedFusedMoeExperts(org_block.experts)
+                return
+
         if is_fp:
             layer.mlp = FusedQwen3MoeMoEBlock.from_hf(config, org_block)
         else:
@@ -171,8 +181,18 @@ def prepare_for_inference(model, model_name, is_fp=False):
         # replace MoE blocks to fused ones
         replace_moe_blocks(model, model_name, model.config, is_fp=True)
     else:
-        # NOTE: for quantized models, we need to first replace HQQ linears with GemLite linears
-        replace_linear_recursive(model)
+        # For native fused Qwen3, keep attention on its original HQQ arithmetic.
+        # Only expert projections are inputs to the packed expert GEMM adapter.
+        from gemq.inference.fused_moe import HQQFusedMoeExperts
+        groups = [layer.mlp.experts for layer in get_blocks(model, model_name)
+                  if hasattr(getattr(layer, 'mlp', None), 'experts')]
+        native = (model.config.model_type == 'qwen3_moe' and groups
+                  and all(isinstance(group, HQQFusedMoeExperts) for group in groups))
+        if native:
+            for group in groups:
+                replace_linear_recursive(group)
+        else:
+            replace_linear_recursive(model)
         replace_moe_blocks(model, model_name, model.config, is_fp=False)
     
     gc.collect()
