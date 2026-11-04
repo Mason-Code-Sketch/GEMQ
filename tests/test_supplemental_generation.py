@@ -62,3 +62,14 @@ def test_real_harness_mmlu_five_shot():
     assert len(result['summary']['subjects'])==57
     assert set(result['harness']['n-shot'].values())=={5}
     assert result['protocol']['status']=='smoke'
+
+
+@pytest.mark.parametrize('profile', ['mmlu_5shot', 'gsm8k_0shot'])
+def test_real_harness_auto_batch(profile):
+    model, tok = tiny('qwen3_moe')
+    with patch('datasets.load_dataset', side_effect=dataset):
+        result = protocol.evaluate(model, tok, profile, batch_size='auto', max_batch_size=2, limit=2)
+    assert result['protocol']['batch_size'] == 'auto'
+    assert result['protocol']['max_batch_size'] == 2
+    assert result['protocol']['status'] == 'smoke'
+    assert set(result['summary']['sample_counts'].values()) == {2}

@@ -278,18 +278,21 @@ def test_failed_smoke_does_not_create_output(checkpoint, monkeypatch):
     assert not list(checkpoint.glob("zeroshot*"))
 
 @pytest.mark.parametrize('profile', ['mmlu_5shot','gsm8k_0shot'])
-def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, profile):
+@pytest.mark.parametrize('batch_args,expected_batch,expected_cap', [([], 'auto', 8), (['--batch_size','2','--max_batch_size','4'], 2, 4)])
+def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, profile, batch_args, expected_batch, expected_cap):
     from gemq import supplemental
     from test_supplemental import raw_result
     raw=raw_result(profile)
-    mock_harness(monkeypatch,raw)
+    _, wrapper = mock_harness(monkeypatch,raw)
     monkeypatch.setattr(supplemental,'version',lambda _: '0.4.13')
     model=Mock();model.config=SimpleNamespace(model_type='qwen3_moe')
     monkeypatch.setattr(entry,'load_model',lambda args:(model,'tokenizer'))
     (checkpoint/'zeroshot.json').write_text('existing seven-task receipt')
     log=checkpoint.parent/'batch-logs'/(profile+'.log')
-    argv=['--model_path',str(checkpoint),'--evaluation',profile,'--log-path',str(log)]
+    argv=['--model_path',str(checkpoint),'--evaluation',profile,'--log-path',str(log)] + batch_args
     entry.main(argv)
+    assert wrapper.call_args.kwargs['batch_size'] == expected_batch
+    assert wrapper.call_args.kwargs['max_batch_size'] == expected_cap
     result=json.loads((checkpoint/(profile+'.json')).read_text())
     assert result['protocol']['num_fewshot']==(5 if profile=='mmlu_5shot' else 0)
     assert result['experiment']['num_fewshot']==result['protocol']['num_fewshot']
