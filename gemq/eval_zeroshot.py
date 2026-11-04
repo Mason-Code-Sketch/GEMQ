@@ -65,16 +65,14 @@ def parse_args(argv=None):
     parser.add_argument("--evaluation", choices=("seven", "mmlu_5shot", "gsm8k_0shot"), default="seven")
     parser.add_argument("--log-path", type=Path, help="Explicit batch log path; defaults beside result")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
-    parser.add_argument("--batch_size", type=batch_size, default=None, help="Batch size: supplemental defaults to auto; seven-task defaults to 1")
-    parser.add_argument("--max_batch_size", type=positive_int, default=8)
+    parser.add_argument("--batch_size", type=batch_size, default="auto", help="Batch size (default: auto)")
+    parser.add_argument("--max_batch_size", type=positive_int, default=64)
     parser.add_argument("--max_length", type=positive_int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include_gsm8k", action="store_true")
     parser.add_argument("--limit", type=positive_int, help="Terminal-only check: examples per leaf task")
     parser.add_argument("--output", type=Path, help="New JSON path; defaults to MODEL_PATH/zeroshot.json")
     args = parser.parse_args(argv)
-    if args.batch_size is None:
-        args.batch_size = 1 if args.evaluation == "seven" else "auto"
     if args.evaluation != "seven":
         if args.tasks != list(ZEROSHOT_TASKS) or args.include_gsm8k:
             parser.error("supplemental --evaluation cannot be combined with --tasks or --include_gsm8k")
