@@ -277,3 +277,29 @@ def test_failed_smoke_does_not_create_output(checkpoint, monkeypatch):
     with pytest.raises(RuntimeError, match="loading failed"):
         entry.main(["--model_path", str(checkpoint), "--limit", "4"])
     assert not list(checkpoint.glob("zeroshot*"))
+
+@pytest.mark.parametrize('profile', ['mmlu_5shot','gsm8k_0shot'])
+def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, profile):
+    from gemq import supplemental
+    from test_supplemental import raw_result
+    raw=raw_result(profile)
+    mock_harness(monkeypatch,raw)
+    monkeypatch.setattr(supplemental,'version',lambda _: '0.4.13')
+    model=Mock();model.config=SimpleNamespace(model_type='qwen3_moe')
+    monkeypatch.setattr(entry,'load_model',lambda args:(model,'tokenizer'))
+    (checkpoint/'zeroshot.json').write_text('existing seven-task receipt')
+    log=checkpoint.parent/'batch-logs'/(profile+'.log')
+    argv=['--model_path',str(checkpoint),'--evaluation',profile,'--log-path',str(log)]
+    entry.main(argv)
+    result=json.loads((checkpoint/(profile+'.json')).read_text())
+    assert result['protocol']['num_fewshot']==(5 if profile=='mmlu_5shot' else 0)
+    assert result['experiment']['num_fewshot']==result['protocol']['num_fewshot']
+    assert 'seven_task_average' not in result['summary']
+    assert log.exists() and result['experiment']['log_path']==str(log)
+    assert (checkpoint/'zeroshot.json').read_text()=='existing seven-task receipt'
+    with pytest.raises(FileExistsError):entry.main(argv)
+
+
+def test_supplemental_rejects_conflicting_task_override(checkpoint):
+    with pytest.raises(SystemExit):
+        entry.parse_args(['--model_path',str(checkpoint),'--evaluation','mmlu_5shot','--include_gsm8k'])

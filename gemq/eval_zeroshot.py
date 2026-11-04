@@ -1,6 +1,7 @@
 """Evaluate an existing GEMQ checkpoint without quantization or Router training."""
 
 import argparse
+import hashlib
 import json
 import sys
 import traceback
@@ -61,6 +62,8 @@ def parse_args(argv=None):
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "grouped_cached", "triton"), default="auto",
                         help="auto selects resident grouped_mm for the four supported FP16/BF16 MoE families; "
                              "triton explicitly requests GEMQ fused kernels")
+    parser.add_argument("--evaluation", choices=("seven", "mmlu_5shot", "gsm8k_0shot"), default="seven")
+    parser.add_argument("--log-path", type=Path, help="Explicit batch log path; defaults beside result")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default=1)
     parser.add_argument("--max_batch_size", type=positive_int, default=8)
@@ -70,6 +73,13 @@ def parse_args(argv=None):
     parser.add_argument("--limit", type=positive_int, help="Terminal-only check: examples per leaf task")
     parser.add_argument("--output", type=Path, help="New JSON path; defaults to MODEL_PATH/zeroshot.json")
     args = parser.parse_args(argv)
+    if args.evaluation != "seven":
+        if args.tasks != list(ZEROSHOT_TASKS) or args.include_gsm8k:
+            parser.error("supplemental --evaluation cannot be combined with --tasks or --include_gsm8k")
+        args.tasks = ["mmlu"] if args.evaluation == "mmlu_5shot" else []
+        args.include_gsm8k = args.evaluation == "gsm8k_0shot"
+    if args.limit is not None and args.log_path is not None:
+        parser.error("smoke tests report to terminal; do not set --log-path")
     if len(set(args.tasks)) != len(args.tasks):
         parser.error("--tasks must not contain duplicates")
     if args.limit is not None and args.output is not None:
@@ -94,10 +104,13 @@ def result_path(args):
             raise FileNotFoundError(args.model_path / name)
     if args.limit is not None:
         return None
-    output = (args.output or args.model_path / "zeroshot.json").expanduser().resolve()
+    output = (args.output or args.model_path / ("zeroshot.json" if args.evaluation == "seven" else args.evaluation + ".json")).expanduser().resolve()
     if output.suffix != ".json":
         raise ValueError("--output must be a JSON path")
-    for path in (output, output.with_suffix(".log")):
+    log_path = (args.log_path or output.with_suffix(".log")).expanduser().resolve()
+    if log_path == output or log_path.suffix != ".log":
+        raise ValueError("log path must be a distinct .log file")
+    for path in (output, log_path, output.with_suffix(".resources.json")):
         if path.exists():
             raise FileExistsError(f"Evaluation output already exists: {path}")
     return output
@@ -226,9 +239,23 @@ def prepare_backend(model, tokenizer, args):
     return backend
 
 
+def checkpoint_identity(directory):
+    """Record small-file hashes and packed-file identity without rehashing GB weights."""
+    records = {}
+    for name in ("config.json", "tokenizer_config.json", "generation_config.json", "qmodel.pt"):
+        path = directory / name
+        if path.exists():
+            stat = path.stat()
+            records[name] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+            if name != "qmodel.pt":
+                records[name]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return records
+
+
 def main(argv=None):
     args = parse_args(argv)
     output = result_path(args)
+    source_identity = checkpoint_identity(args.model_path) if args.evaluation != "seven" else None
     if version("lm_eval") != LM_EVAL_VERSION:
         raise RuntimeError(f"Install lm-eval[hf]=={LM_EVAL_VERSION} for this evaluation")
     from lm_eval.utils import handle_non_serializable
@@ -237,7 +264,9 @@ def main(argv=None):
         log = None
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
-            log = stack.enter_context(output.with_suffix(".log").open("x"))
+            log_path = (args.log_path or output.with_suffix(".log")).expanduser().resolve()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log = stack.enter_context(log_path.open("x"))
             stack.enter_context(redirect_stdout(_Tee(sys.stdout, log)))
             stack.enter_context(redirect_stderr(_Tee(sys.stderr, log)))
         ledger = ResourceLedger(output.with_suffix(".resources.json") if output is not None else None)
@@ -250,14 +279,25 @@ def main(argv=None):
                 model, tokenizer = load_model(args)
             print(f"Modeling implementation: {describe_model_impl(model)}", flush=True)
             with ledger.component("evaluate_zeroshot"):
-                results = run_lm_eval(
-                    model, tokenizer, tasks=args.tasks, batch_size=args.batch_size,
-                    num_fewshot=0, limit=args.limit, seed=args.seed,
-                    max_length=args.max_length, include_gsm8k=args.include_gsm8k,
-                    max_batch_size=args.max_batch_size,
-                )
+                if args.evaluation != "seven":
+                    from gemq.supplemental import evaluate
+                    results = evaluate(model, tokenizer, args.evaluation, seed=args.seed,
+                                       batch_size=args.batch_size, max_batch_size=args.max_batch_size,
+                                       max_length=args.max_length, limit=args.limit)
+                    print(json.dumps(results["summary"], indent=2), flush=True)
+                else:
+                    results = run_lm_eval(
+                        model, tokenizer, tasks=args.tasks, batch_size=args.batch_size,
+                        num_fewshot=0, limit=args.limit, seed=args.seed,
+                        max_length=args.max_length, include_gsm8k=args.include_gsm8k,
+                        max_batch_size=args.max_batch_size,
+                    )
             elapsed = perf_counter() - start
             print(f"Evaluation complete in {elapsed:.2f} seconds", flush=True)
+            if source_identity is not None:
+                if checkpoint_identity(args.model_path) != source_identity:
+                    raise RuntimeError("checkpoint identity changed during evaluation")
+                results["checkpoint_sources"] = source_identity
             if output is None:
                 return
             results["experiment"] = {
@@ -267,10 +307,11 @@ def main(argv=None):
                 "layer_devices": args.layer_devices,
                 "backend": args.backend,
                 "tasks": args.tasks, "include_gsm8k": args.include_gsm8k,
-                "num_fewshot": 0, "apply_chat_template": False, "add_bos_token": False,
+                "num_fewshot": 5 if args.evaluation == "mmlu_5shot" else 0, "apply_chat_template": False, "add_bos_token": False,
                 "batch_size": args.batch_size, "max_length": args.max_length,
                 "max_batch_size": args.max_batch_size,
                 "seed": args.seed, "wall_seconds": elapsed,
+                "evaluation": args.evaluation, "log_path": str(log_path),
                 "versions": {name: version(name) for name in ("lm_eval", "torch", "transformers", "datasets", "hqq")},
             }
             with output.open("x") as stream:
