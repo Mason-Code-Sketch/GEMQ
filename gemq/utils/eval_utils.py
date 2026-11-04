@@ -222,6 +222,9 @@ def run_lm_eval(
         batch_size=batch_size, max_length=max_length, max_batch_size=max_batch_size,
         add_bos_token=False,
     )
+    if include_gsm8k:
+        from gemq.generation_batch import install_generation_batch_probe
+        install_generation_batch_probe(wrapped)
     config = getattr(model, "config", None)
     disable_cache = getattr(config, "model_type", None) == "deepseek_v2"
     if disable_cache:
