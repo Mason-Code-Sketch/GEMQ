@@ -60,7 +60,7 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
 
     task, shots = PROFILES[profile]
     if max_batch_size is None:
-        max_batch_size = {"mmlu_5shot": 19, "gsm8k_0shot": 107}[profile]
+        max_batch_size = {"mmlu_5shot": 17, "gsm8k_0shot": 96}[profile]
     model.eval()
     wrapped = HFLM(pretrained=model, tokenizer=tokenizer, backend="causal",
                    batch_size=batch_size, max_batch_size=max_batch_size,
