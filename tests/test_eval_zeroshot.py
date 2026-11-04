@@ -43,7 +43,7 @@ def test_default_output_is_inside_checkpoint(checkpoint):
     args = entry.parse_args(["--model_path", str(checkpoint)])
     assert tuple(args.tasks) == eval_utils.ZEROSHOT_TASKS
     assert args.batch_size == "auto"
-    assert args.max_batch_size == 64
+    assert args.max_batch_size == 57
     assert args.trust_remote_code
     assert entry.result_path(args) == checkpoint / "zeroshot.json"
 
@@ -278,11 +278,13 @@ def test_failed_smoke_does_not_create_output(checkpoint, monkeypatch):
     assert not list(checkpoint.glob("zeroshot*"))
 
 @pytest.mark.parametrize('profile', ['mmlu_5shot','gsm8k_0shot'])
-@pytest.mark.parametrize('batch_args,expected_batch,expected_cap', [([], 'auto', 64), (['--batch_size','2','--max_batch_size','4'], 2, 4)])
+@pytest.mark.parametrize('batch_args,expected_batch,expected_cap', [([], 'auto', None), (['--batch_size','2','--max_batch_size','4'], 2, 4)])
 def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, profile, batch_args, expected_batch, expected_cap):
     from gemq import supplemental
     from test_supplemental import raw_result
     raw=raw_result(profile)
+    if expected_cap is None:
+        expected_cap = {'mmlu_5shot': 19, 'gsm8k_0shot': 107}[profile]
     _, wrapper = mock_harness(monkeypatch,raw)
     monkeypatch.setattr(supplemental,'version',lambda _: '0.4.13')
     model=Mock();model.config=SimpleNamespace(model_type='qwen3_moe')

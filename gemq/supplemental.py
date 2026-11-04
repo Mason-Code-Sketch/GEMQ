@@ -51,7 +51,7 @@ def summarize(raw, profile, *, limit=None):
 
 
 def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
-             max_batch_size=64, max_length=None, limit=None):
+             max_batch_size=None, max_length=None, limit=None):
     """Use the branch's already-loaded model, without changing its weight backend."""
     if version("lm_eval") != HARNESS_VERSION:
         raise RuntimeError(f"supplemental evaluation requires lm_eval=={HARNESS_VERSION}")
@@ -59,6 +59,8 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
     from lm_eval.models.huggingface import HFLM
 
     task, shots = PROFILES[profile]
+    if max_batch_size is None:
+        max_batch_size = {"mmlu_5shot": 19, "gsm8k_0shot": 107}[profile]
     model.eval()
     wrapped = HFLM(pretrained=model, tokenizer=tokenizer, backend="causal",
                    batch_size=batch_size, max_batch_size=max_batch_size,
