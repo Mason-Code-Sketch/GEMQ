@@ -216,6 +216,40 @@ def validate_checkpoint_paths(args):
         raise ValueError("--fake_save_path must differ from --save_path.")
 
 
+def finalize_packed_checkpoint(model, tokenizer, args, resource_ledger):
+    """Save native HQQ weights and optionally evaluate the fused inference path."""
+    requested = getattr(args, "packed_ppl_backend", "auto")
+    parameter = next(model.parameters())
+    supported = (model.config.model_type == "qwen3_moe"
+                 and parameter.dtype == torch.float16 and parameter.is_cuda)
+    backend = ("triton" if supported else "pytorch") if requested == "auto" else requested
+    accelerated = bool(args.eval_real_quant and backend == "triton")
+    if accelerated and not supported:
+        raise ValueError("Triton packed PPL requires a Qwen3 FP16 model")
+
+    def save():
+        with resource_ledger.component("checkpoint_save"):
+            gc.collect()
+            torch.cuda.empty_cache()
+            save_quantized_model(model, tokenizer, args.save_path, args.save_dtype, args.real_quant)
+            print("Quantized model saved to:", args.save_path)
+
+    # The fused inference layout differs from the HQQ checkpoint format. Save the
+    # original model first, then convert in place without retaining a second copy.
+    if accelerated:
+        save()
+        with resource_ledger.component("prepare_packed_ppl"):
+            from gemq.inference.patch import prepare_for_inference
+            prepare_for_inference(model, args.model_name, is_fp=False)
+    if args.eval_real_quant:
+        with resource_ledger.component("evaluation_real_quant"):
+            print(f"Evaluating real-quant model ... [packed_ppl_backend={backend}]")
+            evaluate_perplexity(model, tokenizer, ["wikitext2", "c4"], args.model_name,
+                                offload=False, dataset_root=args.dataset_root)
+    if not accelerated:
+        save()
+
+
 def capture_router_finetune_state(model, router_params):
     """Capture identity-based router and frozen-parameter checks before AdamW."""
     router_ids = {id(param) for param in router_params}
@@ -676,7 +710,11 @@ def parse_args():
     )
     parser.add_argument(
         "--eval_real_quant", action="store_true",
-        help="Evaluate HQQ-packed weights after real quantization and before saving"
+        help="Evaluate packed weights after real quantization"
+    )
+    parser.add_argument(
+        "--packed_ppl_backend", choices=("auto", "pytorch", "triton"), default="auto",
+        help="auto uses fused Triton packed PPL for Qwen3 FP16; pytorch keeps native HQQ evaluation",
     )
     parser.add_argument(
         "--save_path", type=str, default="",
@@ -835,27 +873,7 @@ if __name__ == "__main__":
                         module.quant_nbits = None
                         module.quant_groupsize = None
 
-            if args.eval_real_quant:
-                with resource_ledger.component("evaluation_real_quant"):
-                    print("Evaluating real-quant model ...")
-                    evaluate_perplexity(
-                        model,
-                        tokenizer,
-                        ["wikitext2", "c4"],
-                        args.model_name,
-                        offload=False,
-                        dataset_root=args.dataset_root,
-                    )
-
-            with resource_ledger.component("checkpoint_save"):
-                save_quantized_model(
-                    model,
-                    tokenizer,
-                    args.save_path,
-                    args.save_dtype,
-                    args.real_quant,
-                )
-                print("Quantized model saved to:", args.save_path)
+            finalize_packed_checkpoint(model, tokenizer, args, resource_ledger)
 
         if args.eval_downstream:
             # Reload exactly the saved final model, including its trained routers.

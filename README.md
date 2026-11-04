@@ -208,3 +208,14 @@ then combine their records with allocation and quantization in the saved model
 directory's `resource_breakdown.json`. Relative script outputs are anchored to
 the repository root. Allocation filenames retain the full bit budget, including
 1.25, 1.75 and 2.25; the native PKL/checkpoint layouts are unchanged.
+
+
+### Packed PPL backend
+
+Packed PPL uses `--packed_ppl_backend auto` by default: Qwen3 FP16 on CUDA
+uses the fused Triton expert path; other configurations use native HQQ.
+Use `--packed_ppl_backend pytorch` for the native HQQ reference. The fused
+path can introduce floating-point differences. Its native HQQ checkpoint is
+saved before inference-layout conversion so downstream loading retains the
+original checkpoint format. Expert GEMM uses a fixed existing kernel configuration
+to avoid repeated tuning for different routed token counts.
