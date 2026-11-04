@@ -43,7 +43,7 @@ def test_default_output_is_inside_checkpoint(checkpoint):
     args = entry.parse_args(["--model_path", str(checkpoint)])
     assert tuple(args.tasks) == eval_utils.ZEROSHOT_TASKS
     assert args.batch_size == "auto"
-    assert args.max_batch_size == 57
+    assert args.max_batch_size == 51
     assert args.trust_remote_code
     assert entry.result_path(args) == checkpoint / "zeroshot.json"
 
@@ -284,7 +284,7 @@ def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, pro
     from test_supplemental import raw_result
     raw=raw_result(profile)
     if expected_cap is None:
-        expected_cap = {'mmlu_5shot': 19, 'gsm8k_0shot': 107}[profile]
+        expected_cap = {'mmlu_5shot': 17, 'gsm8k_0shot': 96}[profile]
     _, wrapper = mock_harness(monkeypatch,raw)
     monkeypatch.setattr(supplemental,'version',lambda _: '0.4.13')
     model=Mock();model.config=SimpleNamespace(model_type='qwen3_moe')

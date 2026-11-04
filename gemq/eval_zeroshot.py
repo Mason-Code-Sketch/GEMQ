@@ -66,7 +66,7 @@ def parse_args(argv=None):
     parser.add_argument("--log-path", type=Path, help="Explicit batch log path; defaults beside result")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default="auto", help="Batch size (default: auto)")
-    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap: seven=57, mmlu_5shot=19, gsm8k_0shot=107")
+    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap: seven=51, mmlu_5shot=17, gsm8k_0shot=96")
     parser.add_argument("--max_length", type=positive_int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include_gsm8k", action="store_true")
@@ -74,7 +74,7 @@ def parse_args(argv=None):
     parser.add_argument("--output", type=Path, help="New JSON path; defaults to MODEL_PATH/zeroshot.json")
     args = parser.parse_args(argv)
     if args.max_batch_size is None:
-        args.max_batch_size = {"seven": 57, "mmlu_5shot": 19, "gsm8k_0shot": 107}[args.evaluation]
+        args.max_batch_size = {"seven": 51, "mmlu_5shot": 17, "gsm8k_0shot": 96}[args.evaluation]
     if args.evaluation != "seven":
         if args.tasks != list(ZEROSHOT_TASKS) or args.include_gsm8k:
             parser.error("supplemental --evaluation cannot be combined with --tasks or --include_gsm8k")

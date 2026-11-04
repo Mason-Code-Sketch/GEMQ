@@ -68,7 +68,7 @@ def test_real_interface_arguments(monkeypatch,profile):
     assert hf.call_args.kwargs['parallelize'] is False
     assert hf.call_args.kwargs['add_bos_token'] is False
     assert hf.call_args.kwargs['batch_size']=='auto'
-    assert hf.call_args.kwargs['max_batch_size']==({'mmlu_5shot': 19, 'gsm8k_0shot': 107}[profile])
+    assert hf.call_args.kwargs['max_batch_size']==({'mmlu_5shot': 17, 'gsm8k_0shot': 96}[profile])
     assert result['protocol']['max_batch_size'] == hf.call_args.kwargs['max_batch_size']
     assert model.config.use_cache is True
     if profile=='gsm8k_0shot':
