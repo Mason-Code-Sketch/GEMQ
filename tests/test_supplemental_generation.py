@@ -48,7 +48,7 @@ def test_real_harness_gsm8k_generation(kind):
     # Real harness, YAML templates, extraction filters, model.generate and forward.
     # Synthetic datasets avoid downloading benchmark data or measuring model quality.
     with patch('datasets.load_dataset',side_effect=dataset):
-        result=protocol.evaluate(model,tok,'gsm8k_0shot',limit=1)
+        result=protocol.evaluate(model,tok,'gsm8k_0shot',batch_size=1,limit=1)
     assert result['protocol']['num_fewshot']==0
     assert result['protocol']['status']=='smoke'
     assert result['summary']['sample_counts']=={'gsm8k':1}
@@ -58,7 +58,7 @@ def test_real_harness_gsm8k_generation(kind):
 def test_real_harness_mmlu_five_shot():
     model,tok=tiny('qwen3_moe')
     with patch('datasets.load_dataset',side_effect=dataset):
-        result=protocol.evaluate(model,tok,'mmlu_5shot',limit=1)
+        result=protocol.evaluate(model,tok,'mmlu_5shot',batch_size=1,limit=1)
     assert len(result['summary']['subjects'])==57
     assert set(result['harness']['n-shot'].values())=={5}
     assert result['protocol']['status']=='smoke'

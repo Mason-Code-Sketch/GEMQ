@@ -50,8 +50,8 @@ def summarize(raw, profile, *, limit=None):
             "subjects": subjects, "sample_counts": counts}
 
 
-def evaluate(model, tokenizer, profile, *, seed=0, batch_size=1,
-             max_batch_size=8, max_length=None, limit=None):
+def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
+             max_batch_size=64, max_length=None, limit=None):
     """Use the branch's already-loaded model, without changing its weight backend."""
     if version("lm_eval") != HARNESS_VERSION:
         raise RuntimeError(f"supplemental evaluation requires lm_eval=={HARNESS_VERSION}")

@@ -67,7 +67,8 @@ def test_real_interface_arguments(monkeypatch,profile):
     assert args['apply_chat_template'] is False and args['fewshot_random_seed']==0
     assert hf.call_args.kwargs['parallelize'] is False
     assert hf.call_args.kwargs['add_bos_token'] is False
-    assert hf.call_args.kwargs['batch_size']==1
+    assert hf.call_args.kwargs['batch_size']=='auto'
+    assert hf.call_args.kwargs['max_batch_size']==64
     assert model.config.use_cache is True
     if profile=='gsm8k_0shot':
         assert args['gen_kwargs']=={'do_sample':False,'temperature':0.0,'max_gen_toks':256}
