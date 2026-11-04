@@ -16,3 +16,5 @@ python -m gemq.eval_zeroshot --model_path /absolute/checkpoint/path --evaluation
 Results default to `mmlu_5shot.json` and `gsm8k_0shot.json` beside `ppl.json` and `zeroshot.json`. Resource JSONs are stored beside each new result. Existing backend, dtype and layer-device flags remain available. `--is_fp` selects a floating HF model. Packed-file size/mtime and small config hashes are recorded; this is not an additional full weight hash.
 
 The existing seven-task zeroshot entry also defaults to `auto` with a maximum batch size of 64; its batch options accept the same manual overrides.
+
+For GSM8K auto batching, the probe length is the longest effective request input plus its generation budget (256 tokens), capped by the unchanged model context limit. The native five-forward-pass probe and OOM batch reduction are retained; this is not a full generation benchmark. Formal input truncation, generation and scoring are unchanged. `GSM8K_BATCH_PROBE` logs and `protocol.generation_batch_probes` record the lengths and selected batch. Fixed batch settings bypass this probe.

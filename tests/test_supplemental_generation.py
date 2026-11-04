@@ -73,3 +73,35 @@ def test_real_harness_auto_batch(profile):
     assert result['protocol']['max_batch_size'] == 2
     assert result['protocol']['status'] == 'smoke'
     assert set(result['summary']['sample_counts'].values()) == {2}
+    if profile == 'gsm8k_0shot':
+        probe = result['protocol']['generation_batch_probes'][0]
+        assert probe['probe_tokens'] == len(tok.encode('Question: Question 1\nAnswer:', add_special_tokens=False)) + 256
+        assert probe['model_max_length'] == 1024
+        assert probe['selected_batch_size'] == 2
+    else:
+        assert result['protocol']['generation_batch_probes'] == []
+
+
+
+def test_gsm8k_auto_probe_preserves_actual_generated_answers():
+    from lm_eval.models.huggingface import HFLM
+    from types import SimpleNamespace
+    from gemq.generation_batch import install_generation_batch_probe
+    model, tok = tiny('qwen3_moe')
+    requests = [SimpleNamespace(args=(text, {'max_gen_toks':8, 'do_sample':False, 'until':['Question:']}))
+                for text in ['Question: 1 Answer:', 'Question: 1 2 1 Answer:']]
+    fixed = HFLM(pretrained=model, tokenizer=tok, backend='causal', batch_size=1,
+                 add_bos_token=False, max_length=512)
+    expected = fixed.generate_until(requests, disable_tqdm=True)
+    auto = HFLM(pretrained=model, tokenizer=tok, backend='causal', batch_size='auto',
+                max_batch_size=2, add_bos_token=False, max_length=512)
+    records = install_generation_batch_probe(auto)
+    with patch.object(auto, '_model_call', wraps=auto._model_call) as forward:
+        actual = auto.generate_until(requests, disable_tqdm=True)
+    assert actual == expected
+    length = max(len(auto.tok_encode(r.args[0])) for r in requests) + 8
+    assert records[0]['probe_tokens'] == length
+    assert records[0]['selected_batch_size'] == 2
+    assert forward.call_count == 5
+    assert all(call.args[0].shape == (2, length) for call in forward.call_args_list)
+    assert auto.max_length == 512

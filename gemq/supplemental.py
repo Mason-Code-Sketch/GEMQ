@@ -63,6 +63,10 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
     wrapped = HFLM(pretrained=model, tokenizer=tokenizer, backend="causal",
                    batch_size=batch_size, max_batch_size=max_batch_size,
                    max_length=max_length, add_bos_token=False, parallelize=False)
+    batch_probes = []
+    if task == "gsm8k":
+        from gemq.generation_batch import install_generation_batch_probe
+        batch_probes = install_generation_batch_probe(wrapped, max_new_tokens=GSM8K_MAX_NEW_TOKENS)
     generation = {"do_sample": False, "temperature": 0.0,
                   "max_gen_toks": GSM8K_MAX_NEW_TOKENS} if task == "gsm8k" else None
     kwargs = {"gen_kwargs": generation} if generation is not None else {}
@@ -94,6 +98,7 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
         "add_bos_token": False, "apply_chat_template": False,
         "batch_size": batch_size, "max_batch_size": max_batch_size,
         "max_length": max_length, "generation_kwargs": generation,
+        "generation_batch_probes": batch_probes,
         "task_configs_sha256": hashlib.sha256(canonical).hexdigest(),
         "versions": {name: version(name) for name in ("lm_eval", "transformers", "torch", "datasets")},
     }}
