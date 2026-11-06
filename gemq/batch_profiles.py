@@ -1,10 +1,12 @@
 """Model-specific auto-batch caps; explicit caller values always take precedence."""
 
 DEFAULT_CAPS = {"seven": 51, "mmlu_5shot": 17, "gsm8k_0shot": 96}
-MIXTRAL_CAPS = {"seven": 34, "mmlu_5shot": 8, "gsm8k_0shot": 48}
-DEEPSEEK_CAPS = {"seven": 8, "mmlu_5shot": 2, "gsm8k_0shot": 16}
-QWEN15_CAPS = {"seven": 12, "mmlu_5shot": 2, "gsm8k_0shot": 24}
+MIXTRAL_CAPS = {"seven": 34, "mmlu_5shot": 13, "gsm8k_0shot": 48}
+DEEPSEEK_CAPS = {"seven": 8, "mmlu_5shot": 3, "gsm8k_0shot": 16}
+QWEN15_CAPS = {"seven": 12, "mmlu_5shot": 5, "gsm8k_0shot": 24}
+QWEN3_CAPS = {"seven": 51, "mmlu_5shot": 60, "gsm8k_0shot": 96}
 MODEL_CAPS = {
+    "qwen3_moe": QWEN3_CAPS,
     "mixtral": MIXTRAL_CAPS,
     "deepseek_v2": DEEPSEEK_CAPS,
     "qwen2_moe": QWEN15_CAPS,

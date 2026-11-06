@@ -77,9 +77,10 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     assert hf.call_args.kwargs['add_bos_token'] is False
     assert hf.call_args.kwargs['batch_size']=='auto'
     caps = {
-        'mixtral': {'mmlu_5shot': 8, 'gsm8k_0shot': 48},
-        'deepseek_v2': {'mmlu_5shot': 2, 'gsm8k_0shot': 16},
-        'qwen2_moe': {'mmlu_5shot': 2, 'gsm8k_0shot': 24},
+        'qwen3_moe': {'mmlu_5shot': 60, 'gsm8k_0shot': 96},
+        'mixtral': {'mmlu_5shot': 13, 'gsm8k_0shot': 48},
+        'deepseek_v2': {'mmlu_5shot': 3, 'gsm8k_0shot': 16},
+        'qwen2_moe': {'mmlu_5shot': 5, 'gsm8k_0shot': 24},
     }.get(model_type, {'mmlu_5shot': 17, 'gsm8k_0shot': 96})
     expected = explicit if explicit is not None else caps[profile]
     assert hf.call_args.kwargs['max_batch_size'] == expected

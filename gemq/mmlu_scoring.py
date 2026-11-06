@@ -31,6 +31,65 @@ def compact_mmlu_scoring(wrapped):
     had_override = "_loglikelihood_tokens" in wrapped.__dict__
     old_override = wrapped.__dict__.get("_loglikelihood_tokens")
 
+    def compact_forward(self, padded, positions, inverse):
+        import torch
+        from torch.nn import functional as F
+        with torch.no_grad(), torch.autocast(device_type=self.device.type,
+                dtype=self.mixed_precision_dtype,
+                enabled=self.mixed_precision_dtype is not None):
+            if native_positions:
+                logits = self.model(padded, logits_to_keep=positions).logits
+            else:
+                def select_positions(_head, args):
+                    hidden = args[0]
+                    return (hidden.index_select(1, positions.to(hidden.device)), *args[1:])
+                hook = self.model.lm_head.register_forward_pre_hook(select_positions)
+                try:
+                    logits = self.model(padded).logits
+                finally:
+                    hook.remove()
+            rows = torch.arange(padded.shape[0], device=logits.device)
+            selected = logits[rows, inverse.to(logits.device), :]
+            logprobs = F.log_softmax(selected, dim=-1, dtype=self.softmax_dtype)
+        del logits, selected
+        return logprobs
+
+    native_detect = wrapped._detect_batch_size
+    had_detect = "_detect_batch_size" in wrapped.__dict__
+    old_detect = wrapped.__dict__.get("_detect_batch_size")
+
+    def detect(self, requests=None, pos=0):
+        if not requests or any(len(r[2]) != 1 or not r[1] for r in requests):
+            return native_detect(requests, pos)
+        import torch
+        from accelerate.utils.memory import find_executable_batch_size
+        from lm_eval.models.utils_hf import clear_torch_cache
+        _, ctx, cont = requests[pos]
+        length = len((ctx + cont)[-(self.max_length + 1):][:-1])
+
+        @find_executable_batch_size(starting_batch_size=self.max_batch_size)
+        def forward_batch(batch_size):
+            inputs = torch.ones((batch_size, length), dtype=torch.long, device=self.device)
+            # Allow the maximum distinct scoring positions a heterogeneous batch
+            # can require, rather than probing only one common final position.
+            count = min(batch_size, length)
+            positions = torch.arange(length - count, length)
+            inverse = torch.arange(batch_size) % count
+            for _ in range(5):
+                out = compact_forward(self, inputs, positions, inverse)
+                del out
+            return batch_size
+
+        try:
+            try:
+                return forward_batch()
+            except RuntimeError as error:
+                if "No executable batch size found" in str(error):
+                    return 1
+                raise
+        finally:
+            clear_torch_cache()
+
     def score(self, requests, disable_tqdm=False, override_bs=None):
         # Native fallback also covers unusual tokenizers and multi-token answer labels.
         if not requests or any(len(r[2]) != 1 or not r[1] for r in requests):
@@ -51,7 +110,7 @@ def compact_mmlu_scoring(wrapped):
         if batch_fn is not None:
             self.batch_sizes = {}
         results = []
-        # Auto probes retain the native full-output path, providing a conservative cap.
+        # Auto probes use the same compact output and full-vocabulary normalization.
         with tqdm(total=len(requests), disable=disable_tqdm or self.rank != 0,
                   desc="Running MMLU scored-position requests") as progress:
             for chunk in ordered.get_batched(n=batch, batch_fn=batch_fn):
@@ -66,24 +125,7 @@ def compact_mmlu_scoring(wrapped):
                     sorted=True, return_inverse=True)
                 # CPU indices also work when the output head resides on a
                 # different GPU from the input embedding.
-                with torch.no_grad(), torch.autocast(device_type=self.device.type,
-                        dtype=self.mixed_precision_dtype,
-                        enabled=self.mixed_precision_dtype is not None):
-                    if native_positions:
-                        logits = self.model(padded, logits_to_keep=positions).logits
-                    else:
-                        def select_positions(_head, args):
-                            hidden = args[0]
-                            return (hidden.index_select(1, positions.to(hidden.device)), *args[1:])
-                        hook = self.model.lm_head.register_forward_pre_hook(select_positions)
-                        try:
-                            logits = self.model(padded).logits
-                        finally:
-                            hook.remove()
-                    rows = torch.arange(len(chunk), device=logits.device)
-                    selected = logits[rows, inverse.to(logits.device), :]
-                    logprobs = F.log_softmax(selected, dim=-1, dtype=self.softmax_dtype)
-                del logits, selected
+                logprobs = compact_forward(self, padded, positions, inverse)
                 for (key, context, continuation), probs in zip(chunk, logprobs, strict=True):
                     probs = probs.view(1, 1, -1)
                     greedy = probs.argmax(dim=-1)
@@ -99,11 +141,16 @@ def compact_mmlu_scoring(wrapped):
                 del logprobs
         return ordered.get_original(results)
 
+    wrapped._detect_batch_size = MethodType(detect, wrapped)
     wrapped._loglikelihood_tokens = MethodType(score, wrapped)
     stats["enabled"] = True
     try:
         yield stats
     finally:
+        if had_detect:
+            wrapped._detect_batch_size = old_detect
+        else:
+            del wrapped._detect_batch_size
         if had_override:
             wrapped._loglikelihood_tokens = old_override
         else:
