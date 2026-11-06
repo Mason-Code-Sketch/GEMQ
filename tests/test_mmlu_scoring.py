@@ -91,6 +91,32 @@ def test_unsupported_keeps_native():
         assert not stats['enabled'];assert h._loglikelihood_tokens==native
 
 
+@pytest.mark.parametrize('kind', ['qwen2', 'qwen3', 'mixtral', 'deepseek'])
+def test_dispatched_model_selects_at_head_without_tensor_keyword(kind):
+    h = harness(fixture_model(kind), 3, True)
+    requests = [((str(n), str(t)), list(range(1, n + 1)), [t])
+                for n in [5, 8, 7] for t in [21, 22, 23, 24]]
+    expected = h._loglikelihood_tokens(requests, disable_tqdm=True)
+    h.model.hf_device_map = {'model.embed_tokens': 0, 'model.layers': 1, 'lm_head': 1}
+    before = dict(h.model.lm_head._forward_pre_hooks)
+    calls = []
+
+    def inspect_call(_model, _args, kwargs):
+        calls.append(kwargs)
+        assert 'logits_to_keep' not in kwargs
+
+    hook = h.model.register_forward_pre_hook(inspect_call, with_kwargs=True)
+    try:
+        with compact_mmlu_scoring(h):
+            actual = h._loglikelihood_tokens(requests, disable_tqdm=True)
+        assert calls
+        assert [x[1] for x in actual] == [x[1] for x in expected]
+        assert [x[0] for x in actual] == pytest.approx([x[0] for x in expected], abs=1e-6)
+        assert dict(h.model.lm_head._forward_pre_hooks) == before
+    finally:
+        hook.remove()
+
+
 def test_qwen_cache_off_preserves_logits_and_eliminates_returned_cache():
     model=fixture_model('qwen2');inputs=torch.tensor([[1,2,3,4]])
     with torch.no_grad():

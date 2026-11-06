@@ -21,6 +21,13 @@ def compact_mmlu_scoring(wrapped):
                       and type(model).__name__ == "DeepseekV2ForCausalLM"
                       and callable(getattr(getattr(model, "lm_head", None),
                                            "register_forward_pre_hook", None)))
+    # Accelerate can move tensor keyword arguments to the input device while
+    # the final decoder hidden states live on another device. Select positions
+    # at the output head for dispatched models, after the decoder has run.
+    device_map = getattr(model, "hf_device_map", None)
+    dispatched = (native_positions and isinstance(device_map, dict)
+                  and len({str(device) for device in device_map.values()}) > 1)
+    select_at_head = legacy_deepseek or (native_positions and dispatched)
     supported = (getattr(wrapped, "backend", None) == "causal"
                  and getattr(wrapped, "world_size", None) == 1
                  and (native_positions or legacy_deepseek))
@@ -37,7 +44,7 @@ def compact_mmlu_scoring(wrapped):
         with torch.no_grad(), torch.autocast(device_type=self.device.type,
                 dtype=self.mixed_precision_dtype,
                 enabled=self.mixed_precision_dtype is not None):
-            if native_positions:
+            if native_positions and not select_at_head:
                 logits = self.model(padded, logits_to_keep=positions).logits
             else:
                 def select_positions(_head, args):
