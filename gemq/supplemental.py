@@ -1,5 +1,6 @@
 """Fixed, independent MMLU 5-shot and GSM8K 0-shot evaluation protocols."""
 from __future__ import annotations
+from gemq.batch_profiles import auto_batch_cap
 
 import hashlib
 import json
@@ -59,8 +60,7 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
     from lm_eval.models.huggingface import HFLM
 
     task, shots = PROFILES[profile]
-    if max_batch_size is None:
-        max_batch_size = {"mmlu_5shot": 17, "gsm8k_0shot": 96}[profile]
+    max_batch_size = auto_batch_cap(model, profile, max_batch_size)
     model.eval()
     wrapped = HFLM(pretrained=model, tokenizer=tokenizer, backend="causal",
                    batch_size=batch_size, max_batch_size=max_batch_size,

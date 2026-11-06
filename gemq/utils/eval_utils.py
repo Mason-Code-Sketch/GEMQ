@@ -1,3 +1,4 @@
+from gemq.batch_profiles import auto_batch_cap
 import gc
 import math
 from importlib.metadata import version
@@ -206,7 +207,7 @@ def summarize_lm_eval(results, tasks, include_gsm8k=False):
 def run_lm_eval(
     model, tokenizer, tasks=None, batch_size="auto", num_fewshot=0,
     limit=None, seed=0, max_length=None, include_gsm8k=False,
-    max_batch_size=51,
+    max_batch_size=None,
 ):
     from lm_eval import evaluator
     from lm_eval.models.huggingface import HFLM
@@ -217,6 +218,7 @@ def run_lm_eval(
     if not tasks or len(set(tasks)) != len(tasks):
         raise ValueError("Tasks must be nonempty and unique")
     requested = tasks + (["gsm8k"] if include_gsm8k else [])
+    max_batch_size = auto_batch_cap(model, "seven", max_batch_size)
     wrapped = HFLM(
         pretrained=model, tokenizer=tokenizer, backend="causal",
         batch_size=batch_size, max_length=max_length, max_batch_size=max_batch_size,
