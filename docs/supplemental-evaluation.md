@@ -4,7 +4,7 @@ The two independent profiles are `mmlu_5shot` and `gsm8k_0shot`. The existing se
 
 Protocol: lm-eval 0.4.13; seed 0 by default; no chat template or added BOS. MMLU uses the harness dev-set first-five examples and sample-weighted accuracy over 57 subjects / 14,042 test questions. GSM8K uses zero demonstrations, the harness Question/Answer prompt and answer filters, deterministic generation, and an explicit 256-token generation budget (the HFLM default). Both strict-match and flexible-extract exact match are stored for all 1,319 test questions. The resolved task configs, including stop strings and extraction filters, are retained in `harness.configs` with a digest in `protocol`.
 
-Each task is a separate invocation and result. Batch size defaults to `auto`, capped at 17 for MMLU 5-shot and 96 for GSM8K 0-shot. Use `--batch_size 1` (or another positive integer) for a fixed batch, and `--max_batch_size 4` to lower the automatic cap. The cap applies to automatic sizing; an explicit fixed batch is used as requested. Actual batch sizes depend on available memory and input lengths. A smoke `--limit 1` means one question per leaf task (57 questions for MMLU), never a full benchmark result. It does not write a formal result JSON. Full runs check actual shot counts, effective sample counts and metrics before writing. Existing results/logs are refused. This interface does not schedule experiments.
+Each task is a separate invocation and result. Batch size defaults to `auto`, with model-specific caps listed below. Use `--batch_size 1` (or another positive integer) for a fixed batch, and `--max_batch_size 4` to lower the automatic cap. The cap applies to automatic sizing; an explicit fixed batch is used as requested. Actual batch sizes depend on available memory and input lengths. A smoke `--limit 1` means one question per leaf task (57 questions for MMLU), never a full benchmark result. It does not write a formal result JSON. Full runs check actual shot counts, effective sample counts and metrics before writing. Existing results/logs are refused. This interface does not schedule experiments.
 
 Use the existing entry point:
 
@@ -15,10 +15,19 @@ python -m gemq.eval_zeroshot --model_path /absolute/checkpoint/path --evaluation
 
 Results default to `mmlu_5shot.json` and `gsm8k_0shot.json` beside `ppl.json` and `zeroshot.json`. Resource JSONs are stored beside each new result. Existing backend, dtype and layer-device flags remain available. `--is_fp` selects a floating HF model. Packed-file size/mtime and small config hashes are recorded; this is not an additional full weight hash.
 
-The existing seven-task zeroshot entry also defaults to `auto` with a maximum batch size of 51; its batch options accept the same manual overrides.
+The existing seven-task zeroshot entry also defaults to `auto` with the model-specific cap listed below; its batch options accept the same manual overrides.
 
 For GSM8K auto batching, the probe length is the longest effective request input plus its generation budget (256 tokens), capped by the unchanged model context limit. The native five-forward-pass probe and OOM batch reduction are retained; this is not a full generation benchmark. Formal input truncation, generation and scoring are unchanged. `GSM8K_BATCH_PROBE` logs and `protocol.generation_batch_probes` record the lengths and selected batch. Fixed batch settings bypass this probe.
 
 ### Model-specific auto batch defaults
 
-The loaded model config selects the auto cap: Mixtral uses 34 for the seven-task suite, 8 for MMLU 5-shot, and 48 for GSM8K 0-shot. Qwen3 and other models retain 51, 17, and 96 respectively. An explicit maximum batch argument overrides these defaults. Mixtral 34 passed a complete KDMoQ seven-task run; 8 and 48 are capacity estimates pending GPU validation. This changes no task, few-shot setting, or generation budget.
+The loaded model config selects the auto cap. An explicit maximum batch argument overrides these defaults; a fixed batch remains explicit.
+
+| Loaded `model_type` | Seven tasks | MMLU 5-shot | GSM8K 0-shot |
+|---|---:|---:|---:|
+| `deepseek_v2` | 8 | 2 | 16 |
+| `qwen2_moe` | 12 | 2 | 24 |
+| `mixtral` | 34 | 8 | 48 |
+| `qwen3_moe` and other models | 51 | 17 | 96 |
+
+DeepSeek-V2-Lite and Qwen1.5-MoE-A2.7B defaults are initial estimates for four 24 GB RTX 4090 cards with decoder layers resident across the cards. Selection uses `model_type`, without hardware detection. Historical GEMQ `grouped_cached` seven-task runs completed at batch 8 for both models; Qwen1.5 batch 12 and both models' MMLU/GSM caps remain estimates pending GPU validation. Different backends or placement may need an explicit cap. Mixtral 34 passed complete KDMoQ seven-task evaluation; its 8 and 48 caps remain estimates. Tasks, few-shot settings and generation budgets are unchanged.
