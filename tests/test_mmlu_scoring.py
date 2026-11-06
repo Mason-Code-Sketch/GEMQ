@@ -3,13 +3,33 @@ import pytest
 import torch
 from unittest.mock import Mock
 from transformers import (Qwen2MoeConfig, Qwen2MoeForCausalLM,
-    Qwen3MoeConfig, Qwen3MoeForCausalLM, MixtralConfig, MixtralForCausalLM)
+    Qwen3MoeConfig, Qwen3MoeForCausalLM, MixtralConfig, MixtralForCausalLM, DeepseekV2Config, DeepseekV2ForCausalLM)
 from lm_eval.models.huggingface import HFLM
 from gemq.mmlu_scoring import compact_mmlu_scoring
 
 
 def fixture_model(kind):
     torch.manual_seed(17)
+    if kind in {'deepseek', 'deepseek_legacy'}:
+        config = DeepseekV2Config(vocab_size=64, hidden_size=32, intermediate_size=48,
+            moe_intermediate_size=16, num_hidden_layers=2, num_attention_heads=4,
+            num_key_value_heads=4, kv_lora_rank=8, q_lora_rank=None,
+            qk_nope_head_dim=4, qk_rope_head_dim=4, v_head_dim=4,
+            n_routed_experts=4, n_shared_experts=1, num_experts_per_tok=2,
+            first_k_dense_replace=1, max_position_embeddings=128, use_cache=False)
+        config._attn_implementation='eager'
+        config._experts_implementation='eager'
+        cls = DeepseekV2ForCausalLM
+        if kind == 'deepseek_legacy':
+            # Check the checkpoint forward contract: full hidden states enter
+            # lm_head, then logits are upcast. Native decoder is a CPU fixture.
+            def forward(self, input_ids, **kwargs):
+                from transformers.modeling_outputs import CausalLMOutputWithPast
+                outputs = self.model(input_ids=input_ids, **kwargs)
+                return CausalLMOutputWithPast(logits=self.lm_head(outputs[0]).float())
+            cls = type('DeepseekV2ForCausalLM', (cls,),
+                       {'forward': forward, '__module__': 'transformers_modules.deepseek_test'})
+        return cls(config).eval()
     config_cls, model_cls = {'qwen2': (Qwen2MoeConfig, Qwen2MoeForCausalLM),
         'qwen3': (Qwen3MoeConfig, Qwen3MoeForCausalLM),
         'mixtral': (MixtralConfig, MixtralForCausalLM)}[kind]
@@ -29,7 +49,7 @@ def harness(model, batch, cache):
     h.cache_hook=Mock(); return h
 
 
-@pytest.mark.parametrize('kind',['qwen2','qwen3','mixtral'])
+@pytest.mark.parametrize('kind',['qwen2','qwen3','mixtral','deepseek','deepseek_legacy'])
 @pytest.mark.parametrize('batch',[1,3])
 @pytest.mark.parametrize('cache',[False,True])
 def test_native_scores_order_grouping_padding_truncation(kind,batch,cache):
@@ -38,7 +58,7 @@ def test_native_scores_order_grouping_padding_truncation(kind,batch,cache):
               for n in [5,17,8,5] for t in [21,22,23,24]]
     expected=h._loglikelihood_tokens(requests,disable_tqdm=True)
     projected=[]
-    hook=h.model.lm_head.register_forward_pre_hook(lambda m,args: projected.append(args[0].shape[1]))
+    hook=h.model.lm_head.register_forward_hook(lambda m,args,out: projected.append(out.shape[1]))
     try:
         with compact_mmlu_scoring(h) as stats:
             actual=h._loglikelihood_tokens(requests,disable_tqdm=True)
@@ -65,7 +85,7 @@ def test_multitoken_falls_back_and_exception_restores():
 
 
 def test_unsupported_keeps_native():
-    h=harness(fixture_model('qwen2'),2,True);h.model.config.model_type='deepseek_v2'
+    h=harness(fixture_model('qwen2'),2,True);h.model.config.model_type='unsupported_model'
     native=h._loglikelihood_tokens
     with compact_mmlu_scoring(h) as stats:
         assert not stats['enabled'];assert h._loglikelihood_tokens==native
@@ -94,3 +114,19 @@ def test_auto_scheduler_uses_cap_and_restores_previous_override():
     h._detect_batch_size.assert_called_once()
     assert h.batch_sizes=={0:2}
     assert h._loglikelihood_tokens==previous
+
+
+def test_legacy_head_hook_removed_on_forward_error():
+    h=harness(fixture_model('deepseek_legacy'),2,True)
+    before=dict(h.model.lm_head._forward_pre_hooks)
+    def fail(*args):
+        raise RuntimeError('head failure')
+    hook=h.model.lm_head.register_forward_hook(fail)
+    try:
+        with compact_mmlu_scoring(h):
+            with pytest.raises(RuntimeError, match='head failure'):
+                h._loglikelihood_tokens([(('x','A'),[1,2,3],[21])],disable_tqdm=True)
+        assert dict(h.model.lm_head._forward_pre_hooks)==before
+        assert '_loglikelihood_tokens' not in h.__dict__
+    finally:
+        hook.remove()
