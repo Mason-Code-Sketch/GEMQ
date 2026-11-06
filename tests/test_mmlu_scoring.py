@@ -111,7 +111,7 @@ def test_auto_scheduler_uses_cap_and_restores_previous_override():
     with compact_mmlu_scoring(h):
         results=h._loglikelihood_tokens(requests,disable_tqdm=True)
     assert len(results)==3
-    h._detect_batch_size.assert_called_once()
+    h._detect_batch_size.assert_not_called()
     assert h.batch_sizes=={0:2}
     assert h._loglikelihood_tokens==previous
 
@@ -128,5 +128,26 @@ def test_legacy_head_hook_removed_on_forward_error():
                 h._loglikelihood_tokens([(('x','A'),[1,2,3],[21])],disable_tqdm=True)
         assert dict(h.model.lm_head._forward_pre_hooks)==before
         assert '_loglikelihood_tokens' not in h.__dict__
+    finally:
+        hook.remove()
+
+
+@pytest.mark.parametrize('kind',['qwen3','deepseek_legacy'])
+def test_compact_probe_five_forwards_halves_oom_and_restores(kind):
+    h=harness(fixture_model(kind),'auto',True)
+    h.max_batch_size=4
+    native=h._detect_batch_size
+    seen=[]
+    def record(_m,args,out):
+        seen.append(tuple(out.shape))
+        if out.shape[0]>2:
+            raise RuntimeError('CUDA out of memory.')
+    hook=h.model.lm_head.register_forward_hook(record)
+    try:
+        with compact_mmlu_scoring(h):
+            assert h._detect_batch_size([(('x','A'),list(range(1,10)),[21])])==2
+        assert h._detect_batch_size==native
+        assert len([shape for shape in seen if shape[0]==2])==5
+        assert all(shape[1]<=shape[0] for shape in seen)
     finally:
         hook.remove()
