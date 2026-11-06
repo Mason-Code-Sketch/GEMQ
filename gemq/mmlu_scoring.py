@@ -9,12 +9,22 @@ def compact_mmlu_scoring(wrapped):
     """Preserve native tokenization, context grouping, full-vocabulary scores and order."""
     model = getattr(wrapped, "model", None)
     stats = {"enabled": False, "optimized_requests": 0, "fallback_calls": 0}
+    kind = getattr(getattr(model, "config", None), "model_type", None)
+    module = type(model).__module__
+    native_positions = (kind in {"qwen2_moe", "qwen3_moe", "mixtral", "deepseek_v2"}
+                        and module.startswith("transformers.models.")
+                        and "logits_to_keep" in inspect.signature(model.forward).parameters)
+    # GEMQ preserves DeepSeek's checkpoint implementation. Keep its decoder
+    # and FP32 logits cast; select hidden positions only at its output head.
+    legacy_deepseek = (kind == "deepseek_v2"
+                      and module.startswith("transformers_modules.")
+                      and type(model).__name__ == "DeepseekV2ForCausalLM"
+                      and callable(getattr(getattr(model, "lm_head", None),
+                                           "register_forward_pre_hook", None)))
     supported = (getattr(wrapped, "backend", None) == "causal"
                  and getattr(wrapped, "world_size", None) == 1
-                 and getattr(getattr(model, "config", None), "model_type", None)
-                 in {"qwen2_moe", "qwen3_moe", "mixtral"}
-                 and type(model).__module__.startswith("transformers.models."))
-    if not supported or "logits_to_keep" not in inspect.signature(model.forward).parameters:
+                 and (native_positions or legacy_deepseek))
+    if not supported:
         yield stats
         return
     native = wrapped._loglikelihood_tokens
@@ -59,7 +69,17 @@ def compact_mmlu_scoring(wrapped):
                 with torch.no_grad(), torch.autocast(device_type=self.device.type,
                         dtype=self.mixed_precision_dtype,
                         enabled=self.mixed_precision_dtype is not None):
-                    logits = self.model(padded, logits_to_keep=positions).logits
+                    if native_positions:
+                        logits = self.model(padded, logits_to_keep=positions).logits
+                    else:
+                        def select_positions(_head, args):
+                            hidden = args[0]
+                            return (hidden.index_select(1, positions.to(hidden.device)), *args[1:])
+                        hook = self.model.lm_head.register_forward_pre_hook(select_positions)
+                        try:
+                            logits = self.model(padded).logits
+                        finally:
+                            hook.remove()
                     rows = torch.arange(len(chunk), device=logits.device)
                     selected = logits[rows, inverse.to(logits.device), :]
                     logprobs = F.log_softmax(selected, dim=-1, dtype=self.softmax_dtype)
