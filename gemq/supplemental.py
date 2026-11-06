@@ -2,6 +2,9 @@
 from __future__ import annotations
 from gemq.batch_profiles import auto_batch_cap
 
+from contextlib import nullcontext
+from gemq.mmlu_scoring import compact_mmlu_scoring
+
 import hashlib
 import json
 import math
@@ -73,17 +76,19 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
                   "max_gen_toks": GSM8K_MAX_NEW_TOKENS} if task == "gsm8k" else None
     kwargs = {"gen_kwargs": generation} if generation is not None else {}
     config = getattr(model, "config", None)
-    disable_cache = getattr(config, "model_type", None) == "deepseek_v2"
+    disable_cache = (getattr(config, "model_type", None) == "deepseek_v2"
+                     or (task == "mmlu" and getattr(config, "model_type", None) == "qwen2_moe"))
     previous_cache = getattr(config, "use_cache", None)
     if disable_cache:
         config.use_cache = False
     try:
-        raw = evaluator.simple_evaluate(
-            model=wrapped, tasks=[task], num_fewshot=shots, limit=limit,
-            apply_chat_template=False, log_samples=False,
-            random_seed=seed, numpy_random_seed=seed, torch_random_seed=seed,
-            fewshot_random_seed=seed, **kwargs,
-        )
+        with (compact_mmlu_scoring(wrapped) if task == "mmlu" else nullcontext(None)) as scoring:
+            raw = evaluator.simple_evaluate(
+                model=wrapped, tasks=[task], num_fewshot=shots, limit=limit,
+                apply_chat_template=False, log_samples=False,
+                random_seed=seed, numpy_random_seed=seed, torch_random_seed=seed,
+                fewshot_random_seed=seed, **kwargs,
+            )
     finally:
         if disable_cache:
             config.use_cache = previous_cache
@@ -101,6 +106,7 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
         "batch_size": batch_size, "max_batch_size": max_batch_size,
         "max_length": max_length, "generation_kwargs": generation,
         "generation_batch_probes": batch_probes,
+        "mmlu_scored_positions": scoring,
         "task_configs_sha256": hashlib.sha256(canonical).hexdigest(),
         "versions": {name: version(name) for name in ("lm_eval", "transformers", "torch", "datasets")},
     }}
