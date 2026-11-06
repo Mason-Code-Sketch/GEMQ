@@ -1,4 +1,5 @@
 """Evaluate an existing GEMQ checkpoint without quantization or Router training."""
+from gemq.batch_profiles import resolve_cli_batch_cap
 
 import argparse
 import hashlib
@@ -66,13 +67,14 @@ def parse_args(argv=None):
     parser.add_argument("--log-path", type=Path, help="Explicit batch log path; defaults beside result")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default="auto", help="Batch size (default: auto)")
-    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap: seven=51, mmlu_5shot=17, gsm8k_0shot=96")
+    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap by model (seven/MMLU5shot/GSM0shot): Mixtral=34/8/48; others=51/17/96")
     parser.add_argument("--max_length", type=positive_int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include_gsm8k", action="store_true")
     parser.add_argument("--limit", type=positive_int, help="Terminal-only check: examples per leaf task")
     parser.add_argument("--output", type=Path, help="New JSON path; defaults to MODEL_PATH/zeroshot.json")
     args = parser.parse_args(argv)
+    args._max_batch_size_explicit = args.max_batch_size is not None
     if args.max_batch_size is None:
         args.max_batch_size = {"seven": 51, "mmlu_5shot": 17, "gsm8k_0shot": 96}[args.evaluation]
     if args.evaluation != "seven":
@@ -279,6 +281,7 @@ def main(argv=None):
             print(f"Loading checkpoint: {args.model_path}", flush=True)
             with ledger.component("load_model"):
                 model, tokenizer = load_model(args)
+            resolve_cli_batch_cap(args, model, args.evaluation)
             print(f"Modeling implementation: {describe_model_impl(model)}", flush=True)
             with ledger.component("evaluate_zeroshot"):
                 if args.evaluation != "seven":

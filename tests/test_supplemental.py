@@ -53,14 +53,16 @@ def test_smoke_is_distinct(profile):
 
 
 @pytest.mark.parametrize('profile', list(protocol.PROFILES))
-def test_real_interface_arguments(monkeypatch,profile):
+@pytest.mark.parametrize('model_type', ['deepseek_v2', 'qwen3_moe', 'mixtral'])
+@pytest.mark.parametrize('explicit', [None, 5])
+def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     raw=raw_result(profile); call=Mock(return_value=raw); hf=Mock()
     pkg=ModuleType('lm_eval');pkg.evaluator=SimpleNamespace(simple_evaluate=call)
     mod=ModuleType('lm_eval.models.huggingface');mod.HFLM=hf
     monkeypatch.setitem(sys.modules,'lm_eval',pkg);monkeypatch.setitem(sys.modules,'lm_eval.models.huggingface',mod)
     monkeypatch.setattr(protocol,'version',lambda _: '0.4.13')
-    model=Mock(); model.config=SimpleNamespace(model_type='deepseek_v2',use_cache=True)
-    result=protocol.evaluate(model,'tokenizer',profile)
+    model=Mock(); model.config=SimpleNamespace(model_type=model_type,use_cache=True)
+    result=protocol.evaluate(model,'tokenizer',profile,max_batch_size=explicit)
     args=call.call_args.kwargs
     assert args['tasks']==[protocol.PROFILES[profile][0]]
     assert args['num_fewshot']==protocol.PROFILES[profile][1]
@@ -68,7 +70,8 @@ def test_real_interface_arguments(monkeypatch,profile):
     assert hf.call_args.kwargs['parallelize'] is False
     assert hf.call_args.kwargs['add_bos_token'] is False
     assert hf.call_args.kwargs['batch_size']=='auto'
-    assert hf.call_args.kwargs['max_batch_size']==({'mmlu_5shot': 17, 'gsm8k_0shot': 96}[profile])
+    expected = explicit or ({'mmlu_5shot': 8, 'gsm8k_0shot': 48} if model_type == 'mixtral' else {'mmlu_5shot': 17, 'gsm8k_0shot': 96})[profile]
+    assert hf.call_args.kwargs['max_batch_size'] == expected
     assert result['protocol']['max_batch_size'] == hf.call_args.kwargs['max_batch_size']
     assert model.config.use_cache is True
     if profile=='gsm8k_0shot':

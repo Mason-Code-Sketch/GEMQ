@@ -18,3 +18,7 @@ Results default to `mmlu_5shot.json` and `gsm8k_0shot.json` beside `ppl.json` an
 The existing seven-task zeroshot entry also defaults to `auto` with a maximum batch size of 51; its batch options accept the same manual overrides.
 
 For GSM8K auto batching, the probe length is the longest effective request input plus its generation budget (256 tokens), capped by the unchanged model context limit. The native five-forward-pass probe and OOM batch reduction are retained; this is not a full generation benchmark. Formal input truncation, generation and scoring are unchanged. `GSM8K_BATCH_PROBE` logs and `protocol.generation_batch_probes` record the lengths and selected batch. Fixed batch settings bypass this probe.
+
+### Model-specific auto batch defaults
+
+The loaded model config selects the auto cap: Mixtral uses 34 for the seven-task suite, 8 for MMLU 5-shot, and 48 for GSM8K 0-shot. Qwen3 and other models retain 51, 17, and 96 respectively. An explicit maximum batch argument overrides these defaults. Mixtral 34 passed a complete KDMoQ seven-task run; 8 and 48 are capacity estimates pending GPU validation. This changes no task, few-shot setting, or generation budget.
