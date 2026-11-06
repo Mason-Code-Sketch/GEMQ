@@ -31,3 +31,10 @@ The loaded model config selects the auto cap. An explicit maximum batch argument
 | `qwen3_moe` and other models | 51 | 17 | 96 |
 
 DeepSeek-V2-Lite and Qwen1.5-MoE-A2.7B defaults are initial estimates for four 24 GB RTX 4090 cards with decoder layers resident across the cards. Selection uses `model_type`, without hardware detection. Historical GEMQ `grouped_cached` seven-task runs completed at batch 8 for both models; Qwen1.5 batch 12 and both models' MMLU/GSM caps remain estimates pending GPU validation. Different backends or placement may need an explicit cap. Mixtral 34 passed complete KDMoQ seven-task evaluation; its 8 and 48 caps remain estimates. Tasks, few-shot settings and generation budgets are unchanged.
+
+
+### MMLU scored positions
+
+MMLU uses compact scoring for native Transformers Qwen2MoE, Qwen3MoE and Mixtral models exposing `logits_to_keep`, on a single evaluation process (including layer placement across devices). For single-token answers it selects the union of each batch row's valid final positions before the output head, then normalizes each scored row over the full vocabulary. Native context truncation, right padding, option reuse, greedy flags and request ordering are retained. Multi-token answers and unsupported models use native HFLM scoring. Auto probes retain full-output forwards and the existing cap, so probing remains conservative. `protocol.mmlu_scored_positions` records activation, optimized request count and fallback calls.
+
+Qwen1.5 MMLU temporarily disables KV caching and restores the original setting on success or exception. GSM8K retains its existing generation cache behavior. CPU tests with small real MoE models check scores and selected answers against native HFLM; full-model GPU speed and peak memory require separate measurements before claiming a performance gain.

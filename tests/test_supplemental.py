@@ -62,6 +62,12 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     monkeypatch.setitem(sys.modules,'lm_eval',pkg);monkeypatch.setitem(sys.modules,'lm_eval.models.huggingface',mod)
     monkeypatch.setattr(protocol,'version',lambda _: '0.4.13')
     model=Mock(); model.config=SimpleNamespace(model_type=model_type,use_cache=True)
+    def evaluate_callback(**kwargs):
+        expected_cache = not (model_type == 'deepseek_v2' or
+                              (model_type == 'qwen2_moe' and profile == 'mmlu_5shot'))
+        assert model.config.use_cache is expected_cache
+        return raw
+    call.side_effect = evaluate_callback
     result=protocol.evaluate(model,'tokenizer',profile,max_batch_size=explicit)
     args=call.call_args.kwargs
     assert args['tasks']==[protocol.PROFILES[profile][0]]
