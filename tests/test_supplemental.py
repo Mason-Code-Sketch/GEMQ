@@ -53,7 +53,7 @@ def test_smoke_is_distinct(profile):
 
 
 @pytest.mark.parametrize('profile', list(protocol.PROFILES))
-@pytest.mark.parametrize('model_type', ['deepseek_v2', 'qwen3_moe', 'mixtral'])
+@pytest.mark.parametrize('model_type', ['deepseek_v2', 'qwen2_moe', 'qwen3_moe', 'mixtral'])
 @pytest.mark.parametrize('explicit', [None, 5])
 def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     raw=raw_result(profile); call=Mock(return_value=raw); hf=Mock()
@@ -70,7 +70,12 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     assert hf.call_args.kwargs['parallelize'] is False
     assert hf.call_args.kwargs['add_bos_token'] is False
     assert hf.call_args.kwargs['batch_size']=='auto'
-    expected = explicit or ({'mmlu_5shot': 8, 'gsm8k_0shot': 48} if model_type == 'mixtral' else {'mmlu_5shot': 17, 'gsm8k_0shot': 96})[profile]
+    caps = {
+        'mixtral': {'mmlu_5shot': 8, 'gsm8k_0shot': 48},
+        'deepseek_v2': {'mmlu_5shot': 2, 'gsm8k_0shot': 16},
+        'qwen2_moe': {'mmlu_5shot': 2, 'gsm8k_0shot': 24},
+    }.get(model_type, {'mmlu_5shot': 17, 'gsm8k_0shot': 96})
+    expected = explicit if explicit is not None else caps[profile]
     assert hf.call_args.kwargs['max_batch_size'] == expected
     assert result['protocol']['max_batch_size'] == hf.call_args.kwargs['max_batch_size']
     assert model.config.use_cache is True

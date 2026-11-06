@@ -2,6 +2,13 @@
 
 DEFAULT_CAPS = {"seven": 51, "mmlu_5shot": 17, "gsm8k_0shot": 96}
 MIXTRAL_CAPS = {"seven": 34, "mmlu_5shot": 8, "gsm8k_0shot": 48}
+DEEPSEEK_CAPS = {"seven": 8, "mmlu_5shot": 2, "gsm8k_0shot": 16}
+QWEN15_CAPS = {"seven": 12, "mmlu_5shot": 2, "gsm8k_0shot": 24}
+MODEL_CAPS = {
+    "mixtral": MIXTRAL_CAPS,
+    "deepseek_v2": DEEPSEEK_CAPS,
+    "qwen2_moe": QWEN15_CAPS,
+}
 
 
 def auto_batch_cap(model, profile, explicit=None):
@@ -9,7 +16,7 @@ def auto_batch_cap(model, profile, explicit=None):
     if explicit is not None:
         return explicit
     model_type = getattr(getattr(model, "config", None), "model_type", None)
-    caps = MIXTRAL_CAPS if model_type == "mixtral" else DEFAULT_CAPS
+    caps = MODEL_CAPS.get(model_type, DEFAULT_CAPS)
     return caps[profile]
 
 
