@@ -9,10 +9,10 @@ from gemq import supplemental as protocol
 
 
 def raw_result(profile, count=None):
-    if profile == 'gsm8k_0shot':
+    if profile == 'gsm8k_5shot':
         return {'results': {'gsm8k': {'exact_match,strict-match': .25, 'exact_match,flexible-extract': .5}},
-                'n-shot': {'gsm8k': 0}, 'n-samples': {'gsm8k': {'effective': count or 1319}},
-                'configs': {'gsm8k': {'num_fewshot': 0, 'generation_kwargs': {'until': ['Question:']}}}}
+                'n-shot': {'gsm8k': 5}, 'n-samples': {'gsm8k': {'effective': count or 1319}},
+                'configs': {'gsm8k': {'num_fewshot': 5, 'generation_kwargs': {'until': ['Question:']}}}}
     names = ['mmlu_'+str(i) for i in range(57)]
     counts = {n: (246 if i < 56 else 266) for i,n in enumerate(names)}
     if count: counts = {n: count for n in names}
@@ -77,17 +77,17 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     assert hf.call_args.kwargs['add_bos_token'] is False
     assert hf.call_args.kwargs['batch_size']=='auto'
     caps = {
-        'qwen3_moe': {'mmlu_5shot': 60, 'gsm8k_0shot': 96},
-        'mixtral': {'mmlu_5shot': 13, 'gsm8k_0shot': 48},
-        'deepseek_v2': {'mmlu_5shot': 3, 'gsm8k_0shot': 16},
-        'qwen2_moe': {'mmlu_5shot': 5, 'gsm8k_0shot': 24},
-    }.get(model_type, {'mmlu_5shot': 17, 'gsm8k_0shot': 96})
+        'qwen3_moe': {'mmlu_5shot': 60, 'gsm8k_5shot': 96},
+        'mixtral': {'mmlu_5shot': 13, 'gsm8k_5shot': 48},
+        'deepseek_v2': {'mmlu_5shot': 24, 'gsm8k_5shot': 128},
+        'qwen2_moe': {'mmlu_5shot': 24, 'gsm8k_5shot': 128},
+    }.get(model_type, {'mmlu_5shot': 17, 'gsm8k_5shot': 96})
     expected = explicit if explicit is not None else caps[profile]
     assert hf.call_args.kwargs['max_batch_size'] == expected
     assert result['protocol']['max_batch_size'] == hf.call_args.kwargs['max_batch_size']
     assert model.config.use_cache is True
-    if profile=='gsm8k_0shot':
-        assert args['gen_kwargs']=={'do_sample':False,'temperature':0.0,'max_gen_toks':256}
+    if profile=='gsm8k_5shot':
+        assert args['gen_kwargs']=={'do_sample':False,'temperature':0.0,'max_gen_toks':1024}
     else:assert 'gen_kwargs' not in args
     assert result['protocol']['status']=='complete'
     assert len(result['protocol']['task_configs_sha256'])==64

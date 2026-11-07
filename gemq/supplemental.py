@@ -1,4 +1,4 @@
-"""Fixed, independent MMLU 5-shot and GSM8K 0-shot evaluation protocols."""
+"""Fixed, independent MMLU 5-shot and GSM8K 5-shot evaluation protocols."""
 from __future__ import annotations
 from gemq.batch_profiles import auto_batch_cap
 
@@ -10,10 +10,10 @@ import json
 import math
 from importlib.metadata import version
 
-PROFILES = {"mmlu_5shot": ("mmlu", 5), "gsm8k_0shot": ("gsm8k", 0)}
+PROFILES = {"mmlu_5shot": ("mmlu", 5), "gsm8k_5shot": ("gsm8k", 5)}
 HARNESS_VERSION = "0.4.13"
-# HFLM's default generation budget, made explicit for reproducibility.
-GSM8K_MAX_NEW_TOKENS = 256
+# Allow room for the five-shot solution before native stop sequences end generation.
+GSM8K_MAX_NEW_TOKENS = 1024
 
 
 def summarize(raw, profile, *, limit=None):
