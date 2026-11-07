@@ -8,6 +8,8 @@ class Harness:
     batch_size = "auto"
     max_batch_size = 64
     max_length = 40960
+    backend = "causal"
+    world_size = 1
 
     def __init__(self):
         self.calls = []
@@ -29,6 +31,14 @@ class Harness:
         if self.fail:
             raise RuntimeError("generation failed")
         return [r.args[0] for r in requests]
+
+
+@pytest.fixture(autouse=True)
+def mock_device_probe(monkeypatch):
+    def probe(wrapped, tokens, context_tokens=None):
+        wrapped.calls.append([(None, [1] * tokens, [1])])
+        return 57
+    monkeypatch.setattr("gemq.generation_batch.probe_generation_batch", probe)
 
 
 def request(length, budget=256):
@@ -78,7 +88,7 @@ def test_existing_instance_detector_is_restored():
     records = install_generation_batch_probe(wrapped)
     wrapped.generate_until([request(20)])
     assert wrapped._detect_batch_size is original
-    assert records[0]["selected_batch_size"] == 32
+    assert records[0]["selected_batch_size"] == 57
 
 
 def test_fixed_batch_and_empty_requests_skip_probe():
@@ -98,3 +108,11 @@ def test_invalid_budget_fails_before_mutating_detector(budget):
     with pytest.raises(ValueError, match="generation budget"):
         wrapped.generate_until([request(10, budget)])
     assert "_detect_batch_size" not in wrapped.__dict__
+
+
+def test_distributed_evaluator_uses_native_rank_synchronization():
+    wrapped = Harness(); wrapped.world_size = 2
+    records = install_generation_batch_probe(wrapped)
+    wrapped.generate_until([request(20)])
+    assert len(wrapped.calls[0][0][1]) == 276
+    assert records[0]["selected_batch_size"] == 57

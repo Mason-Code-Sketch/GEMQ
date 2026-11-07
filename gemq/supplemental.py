@@ -4,6 +4,7 @@ from gemq.batch_profiles import auto_batch_cap
 
 from contextlib import nullcontext
 from gemq.mmlu_scoring import compact_mmlu_scoring
+from gemq.generation_logits import compact_generation_logits
 
 import hashlib
 import json
@@ -82,7 +83,10 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
     if disable_cache:
         config.use_cache = False
     try:
-        with (compact_mmlu_scoring(wrapped) if task == "mmlu" else nullcontext(None)) as scoring:
+        with (
+            (compact_mmlu_scoring(wrapped) if task == "mmlu" else nullcontext(None)) as scoring,
+            (compact_generation_logits(wrapped) if task == "gsm8k" else nullcontext(None)) as generation_logits,
+        ):
             raw = evaluator.simple_evaluate(
                 model=wrapped, tasks=[task], num_fewshot=shots, limit=limit,
                 apply_chat_template=False, log_samples=False,
@@ -106,6 +110,7 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
         "batch_size": batch_size, "max_batch_size": max_batch_size,
         "max_length": max_length, "generation_kwargs": generation,
         "generation_batch_probes": batch_probes,
+        "generation_logits": generation_logits,
         "mmlu_scored_positions": scoring,
         "task_configs_sha256": hashlib.sha256(canonical).hexdigest(),
         "versions": {name: version(name) for name in ("lm_eval", "transformers", "torch", "datasets")},
