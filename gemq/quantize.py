@@ -188,7 +188,7 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
         normalize_legacy_tied_weights_for_serialization(model)
         tokenizer.save_pretrained(save_path)
         # Bound temporary CPU copies during safetensors serialization on unified memory.
-        model.save_pretrained(save_path, max_shard_size="5GB")
+        model.save_pretrained(save_path, max_shard_size="5GB", save_original_format=False)
 
 
 def release_unused_memory():

@@ -47,7 +47,7 @@ def test_qwen3_round_trip_preserves_weights_and_limits_shards(tmp_path, save_dty
     tokenizer = SimpleNamespace(save_pretrained=Mock())
     save, _ = production_save()
     save(model, tokenizer, str(tmp_path), save_dtype, real_quant=False)
-    assert calls == [{"max_shard_size": "5GB"}]
+    assert calls == [{"max_shard_size": "5GB", "save_original_format": False}]
     tokenizer.save_pretrained.assert_called_once_with(str(tmp_path))
     reloaded = Qwen3MoeForCausalLM.from_pretrained(tmp_path, dtype=dtype).eval()
     assert expected.keys() == reloaded.state_dict().keys()
