@@ -188,7 +188,8 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
         model = model.to(dtype)
         normalize_legacy_tied_weights_for_serialization(model)
         tokenizer.save_pretrained(save_path)
-        model.save_pretrained(save_path)
+        # Avoid whole-model reverse-conversion copies before bounded shard writing.
+        model.save_pretrained(save_path, max_shard_size="5GB", save_original_format=False)
 
 
 def validate_checkpoint_paths(args):
