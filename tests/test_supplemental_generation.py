@@ -52,7 +52,7 @@ def test_real_harness_gsm8k_generation(kind):
     assert result['protocol']['num_fewshot']==5
     assert result['protocol']['status']=='smoke'
     assert result['summary']['sample_counts']=={'gsm8k':1}
-    assert result['harness']['configs']['gsm8k']['generation_kwargs']['max_gen_toks']==1024
+    assert result['harness']['configs']['gsm8k']['generation_kwargs']['max_gen_toks']==512
 
 
 def test_real_harness_mmlu_five_shot():
@@ -76,7 +76,7 @@ def test_real_harness_auto_batch(profile):
     if profile == 'gsm8k_5shot':
         probe = result['protocol']['generation_batch_probes'][0]
         assert probe['max_input_tokens'] > len(tok.encode('Question: Question 1\nAnswer:', add_special_tokens=False))
-        assert probe['probe_tokens'] == probe['max_input_tokens'] + 1024
+        assert probe['probe_tokens'] == probe['max_input_tokens'] + 512
         assert probe['model_max_length'] == 2048
         assert probe['selected_batch_size'] == 2
     else:
