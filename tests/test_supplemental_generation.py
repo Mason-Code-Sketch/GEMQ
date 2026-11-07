@@ -103,6 +103,57 @@ def test_gsm8k_auto_probe_preserves_actual_generated_answers():
     length = max(len(auto.tok_encode(r.args[0])) for r in requests) + 8
     assert records[0]['probe_tokens'] == length
     assert records[0]['selected_batch_size'] == 2
-    assert forward.call_count == 5
-    assert all(call.args[0].shape == (2, length) for call in forward.call_args_list)
+    assert forward.call_count == 0
     assert auto.max_length == 512
+
+
+@pytest.mark.parametrize('kind', ['deepseek_v2', 'qwen2_moe', 'qwen3_moe', 'mixtral'])
+def test_generation_probe_only_projects_last_position_and_keeps_answers(kind):
+    from lm_eval.models.huggingface import HFLM
+    from gemq.generation_batch import probe_generation_batch
+    model, tok = tiny(kind)
+    wrapped = HFLM(pretrained=model, tokenizer=tok, backend='causal', batch_size='auto',
+                   max_batch_size=2, add_bos_token=False, max_length=512)
+    inputs = tok('Question: 1 Answer:', return_tensors='pt')['input_ids']
+    settings = dict(max_new_tokens=8, do_sample=False, pad_token_id=tok.pad_token_id)
+    before = model.generate(inputs, **settings)
+    head_shapes = []
+    hook = model.lm_head.register_forward_pre_hook(lambda _, args: head_shapes.append(tuple(args[0].shape)))
+    try:
+        assert probe_generation_batch(wrapped, 24) == 2
+    finally:
+        hook.remove()
+    after = model.generate(inputs, **settings)
+    assert torch.equal(before, after)
+    assert head_shapes and all(shape[:2] == (2, 1) for shape in head_shapes)
+    assert len(head_shapes) == 4
+
+
+@pytest.mark.parametrize('kind', ['deepseek_v2', 'qwen2_moe', 'qwen3_moe', 'mixtral'])
+def test_compact_generation_keeps_tokens_with_full_sequence_model(kind):
+    from functools import wraps
+    from types import SimpleNamespace
+    from gemq.generation_logits import compact_generation_logits
+    model, tok = tiny(kind)
+    native_forward = model.forward
+
+    @wraps(native_forward)
+    def full_sequence(*args, **kwargs):
+        kwargs['logits_to_keep'] = 0
+        return native_forward(*args, **kwargs)
+
+    model.forward = full_sequence
+    inputs = tok('Question: 1 Answer:', return_tensors='pt')['input_ids']
+    kwargs = dict(max_new_tokens=8, do_sample=False, pad_token_id=tok.pad_token_id)
+    expected = model.generate(inputs, **kwargs)
+    hooks_before = len(model.lm_head._forward_pre_hooks)
+    with compact_generation_logits(SimpleNamespace(model=model)) as stats:
+        actual = model.generate(inputs, **kwargs)
+    assert torch.equal(expected, actual)
+    assert stats['enabled'] and stats['trimmed_calls'] > 0
+    assert stats['max_input_positions'] == inputs.shape[1]
+    assert len(model.lm_head._forward_pre_hooks) == hooks_before
+    with pytest.raises(RuntimeError, match='trial'):
+        with compact_generation_logits(SimpleNamespace(model=model)):
+            raise RuntimeError('trial')
+    assert len(model.lm_head._forward_pre_hooks) == hooks_before
