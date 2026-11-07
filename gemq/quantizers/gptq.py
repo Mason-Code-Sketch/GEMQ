@@ -120,10 +120,9 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
                 err = torch.sum(q, 1)
 
                 tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[tmp]
-                    scales[tmp] = tmp_scales[tmp]
-                    zeros[tmp] = tmp_zeros[tmp]
+                best = torch.where(tmp, err, best)
+                scales = torch.where(tmp.unsqueeze(1), tmp_scales, scales)
+                zeros = torch.where(tmp.unsqueeze(1), tmp_zeros, zeros)
 
         empty = (x == 0).all(dim=1)
         scales[empty] = 1
@@ -167,7 +166,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         Hinv = inverse_hessian_factor(H, self.percdamp)
 
         # initialize quantization params (assuming groupsize < 0)
-        scales, zeros, max_int = self.find_params(W)
+        if self.groupsize <= 0:
+            scales, zeros, max_int = self.find_params(W)
         scales_list = []
         zeros_list = []
 
@@ -331,10 +331,9 @@ class GPTQWeightQuantizer(nn.Module):
                 err = torch.sum(q, 1)
 
                 tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[tmp]
-                    scales[tmp] = tmp_scales[tmp]
-                    zeros[tmp] = tmp_zeros[tmp]
+                best = torch.where(tmp, err, best)
+                scales = torch.where(tmp.unsqueeze(1), tmp_scales, scales)
+                zeros = torch.where(tmp.unsqueeze(1), tmp_zeros, zeros)
 
         empty = (x == 0).all(dim=1)
         scales[empty] = 1
@@ -376,7 +375,8 @@ class GPTQWeightQuantizer(nn.Module):
         Hinv = inverse_hessian_factor(H, self.percdamp)
 
         # initialize quantization params (assuming groupsize < 0)
-        scales, zeros, max_int = self.find_params(W)
+        if self.groupsize <= 0:
+            scales, zeros, max_int = self.find_params(W)
         scales_list = []
         zeros_list = []
 
