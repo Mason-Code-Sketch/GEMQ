@@ -87,7 +87,7 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     assert result['protocol']['max_batch_size'] == hf.call_args.kwargs['max_batch_size']
     assert model.config.use_cache is True
     if profile=='gsm8k_5shot':
-        assert args['gen_kwargs']=={'do_sample':False,'temperature':0.0,'max_gen_toks':1024}
+        assert args['gen_kwargs']=={'do_sample':False,'temperature':0.0,'max_gen_toks':512}
     else:assert 'gen_kwargs' not in args
     assert result['protocol']['status']=='complete'
     assert len(result['protocol']['task_configs_sha256'])==64

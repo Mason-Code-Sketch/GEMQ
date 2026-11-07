@@ -13,7 +13,7 @@ from importlib.metadata import version
 PROFILES = {"mmlu_5shot": ("mmlu", 5), "gsm8k_5shot": ("gsm8k", 5)}
 HARNESS_VERSION = "0.4.13"
 # Allow room for the five-shot solution before native stop sequences end generation.
-GSM8K_MAX_NEW_TOKENS = 1024
+GSM8K_MAX_NEW_TOKENS = 512
 
 
 def summarize(raw, profile, *, limit=None):
