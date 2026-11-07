@@ -92,12 +92,16 @@ def test_unsupported_keeps_native():
 
 
 @pytest.mark.parametrize('kind', ['qwen2', 'qwen3', 'mixtral', 'deepseek'])
-def test_dispatched_model_selects_at_head_without_tensor_keyword(kind):
+@pytest.mark.parametrize('placement', ['unmapped', 'single', 'multiple'])
+def test_model_selects_at_head_without_tensor_keyword(kind, placement):
     h = harness(fixture_model(kind), 3, True)
     requests = [((str(n), str(t)), list(range(1, n + 1)), [t])
                 for n in [5, 8, 7] for t in [21, 22, 23, 24]]
     expected = h._loglikelihood_tokens(requests, disable_tqdm=True)
-    h.model.hf_device_map = {'model.embed_tokens': 0, 'model.layers': 1, 'lm_head': 1}
+    if placement == 'single':
+        h.model.hf_device_map = {'': 0}
+    elif placement == 'multiple':
+        h.model.hf_device_map = {'model.embed_tokens': 0, 'model.layers': 1, 'lm_head': 1}
     before = dict(h.model.lm_head._forward_pre_hooks)
     calls = []
 

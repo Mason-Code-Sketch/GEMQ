@@ -1,5 +1,4 @@
 """Compact single-token MMLU scoring for supported native causal models."""
-import inspect
 from contextlib import contextmanager
 from types import MethodType
 
@@ -11,26 +10,16 @@ def compact_mmlu_scoring(wrapped):
     stats = {"enabled": False, "optimized_requests": 0, "fallback_calls": 0}
     kind = getattr(getattr(model, "config", None), "model_type", None)
     module = type(model).__module__
-    native_positions = (kind in {"qwen2_moe", "qwen3_moe", "mixtral", "deepseek_v2"}
-                        and module.startswith("transformers.models.")
-                        and "logits_to_keep" in inspect.signature(model.forward).parameters)
-    # GEMQ preserves DeepSeek's checkpoint implementation. Keep its decoder
-    # and FP32 logits cast; select hidden positions only at its output head.
+    native_model = (kind in {"qwen2_moe", "qwen3_moe", "mixtral", "deepseek_v2"}
+                    and module.startswith("transformers.models."))
     legacy_deepseek = (kind == "deepseek_v2"
                       and module.startswith("transformers_modules.")
-                      and type(model).__name__ == "DeepseekV2ForCausalLM"
-                      and callable(getattr(getattr(model, "lm_head", None),
-                                           "register_forward_pre_hook", None)))
-    # Accelerate can move tensor keyword arguments to the input device while
-    # the final decoder hidden states live on another device. Select positions
-    # at the output head for dispatched models, after the decoder has run.
-    device_map = getattr(model, "hf_device_map", None)
-    dispatched = (native_positions and isinstance(device_map, dict)
-                  and len({str(device) for device in device_map.values()}) > 1)
-    select_at_head = legacy_deepseek or (native_positions and dispatched)
+                      and type(model).__name__ == "DeepseekV2ForCausalLM")
+    head = getattr(model, "lm_head", None)
     supported = (getattr(wrapped, "backend", None) == "causal"
                  and getattr(wrapped, "world_size", None) == 1
-                 and (native_positions or legacy_deepseek))
+                 and (native_model or legacy_deepseek)
+                 and callable(getattr(head, "register_forward_pre_hook", None)))
     if not supported:
         yield stats
         return
@@ -41,20 +30,19 @@ def compact_mmlu_scoring(wrapped):
     def compact_forward(self, padded, positions, inverse):
         import torch
         from torch.nn import functional as F
+
+        def select_positions(_head, args):
+            hidden = args[0]
+            return (hidden.index_select(1, positions.to(hidden.device)), *args[1:])
+
         with torch.no_grad(), torch.autocast(device_type=self.device.type,
                 dtype=self.mixed_precision_dtype,
                 enabled=self.mixed_precision_dtype is not None):
-            if native_positions and not select_at_head:
-                logits = self.model(padded, logits_to_keep=positions).logits
-            else:
-                def select_positions(_head, args):
-                    hidden = args[0]
-                    return (hidden.index_select(1, positions.to(hidden.device)), *args[1:])
-                hook = self.model.lm_head.register_forward_pre_hook(select_positions)
-                try:
-                    logits = self.model(padded).logits
-                finally:
-                    hook.remove()
+            hook = head.register_forward_pre_hook(select_positions)
+            try:
+                logits = self.model(padded).logits
+            finally:
+                hook.remove()
             rows = torch.arange(padded.shape[0], device=logits.device)
             selected = logits[rows, inverse.to(logits.device), :]
             logprobs = F.log_softmax(selected, dim=-1, dtype=self.softmax_dtype)
