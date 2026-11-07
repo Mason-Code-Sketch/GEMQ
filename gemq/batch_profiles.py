@@ -2,8 +2,8 @@
 
 DEFAULT_CAPS = {"seven": 51, "mmlu_5shot": 17, "gsm8k_0shot": 96}
 MIXTRAL_CAPS = {"seven": 34, "mmlu_5shot": 13, "gsm8k_0shot": 48}
-DEEPSEEK_CAPS = {"seven": 8, "mmlu_5shot": 8, "gsm8k_0shot": 128}
-QWEN15_CAPS = {"seven": 12, "mmlu_5shot": 12, "gsm8k_0shot": 128}
+DEEPSEEK_CAPS = {"seven": 8, "mmlu_5shot": 24, "gsm8k_0shot": 128}
+QWEN15_CAPS = {"seven": 12, "mmlu_5shot": 24, "gsm8k_0shot": 128}
 QWEN3_CAPS = {"seven": 51, "mmlu_5shot": 60, "gsm8k_0shot": 96}
 MODEL_CAPS = {
     "qwen3_moe": QWEN3_CAPS,
