@@ -20,6 +20,7 @@ from gemq.utils.model_utils import *
 from gemq.quantizers.rtn import MCMoeRTNWeightQuantizer
 from gemq.utils.hf_loading import (
     sequential_weight_loading,
+    load_stats_model,
     layer_grads_max_memory,
     align_deepseek_softmax_scale,
     ensure_deepseek_v2_remote_code_compat,
@@ -928,11 +929,9 @@ def main(args) -> None:
             if args.model_name == "deepseek-ai/DeepSeek-V2-Lite":
                 ensure_deepseek_v2_remote_code_compat()
             tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=args.use_fast)
-            model = AutoModelForCausalLM.from_pretrained(
-                args.model,
-                device_map=("auto" if args.mode == "layer_grads" else "cpu"),
-                max_memory=(layer_grads_max_memory(args.layer_grads_gpu_memory_gib)
-                            if args.mode == "layer_grads" else None),
+            model = load_stats_model(
+                AutoModelForCausalLM, args.model, mode=args.mode,
+                gpu_weight_budget_gib=args.layer_grads_gpu_memory_gib,
                 torch_dtype=args.model_dtype,
                 attn_implementation=args.attn_impl,
                 trust_remote_code=True,

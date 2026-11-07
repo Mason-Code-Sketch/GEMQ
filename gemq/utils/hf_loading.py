@@ -22,6 +22,30 @@ import transformers
 
 
 
+def load_stats_model(model_class, model_path, *, mode, gpu_weight_budget_gib=None, **kwargs):
+    """Stage integrated-GPU gradients through CPU, preserving final GPU residency.
+
+    Direct auto placement can retain host loading tensors while GPU weights are
+    already resident. Finish CPU loading first, then move modules in place.
+    Explicit weight budgets and discrete/multi-GPU placement retain auto behavior.
+    """
+    staged = (mode == "layer_grads" and gpu_weight_budget_gib is None
+              and torch.cuda.is_available() and torch.cuda.device_count() == 1
+              and getattr(torch.cuda.get_device_properties(0), "is_integrated", False))
+    model = model_class.from_pretrained(
+        model_path, device_map="cpu" if staged or mode != "layer_grads" else "auto",
+        max_memory=layer_grads_max_memory(gpu_weight_budget_gib) if mode == "layer_grads" else None,
+        **kwargs,
+    )
+    if staged:
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        model.to("cuda:0")
+        model.hf_device_map = {"": "cuda:0"}
+    return model
+
+
 def layer_grads_max_memory(gpu_weight_budget_gib):
     """Keep overflow weights in CPU memory instead of implicit disk offload."""
     if gpu_weight_budget_gib is None:
