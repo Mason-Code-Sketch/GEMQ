@@ -278,14 +278,14 @@ def test_failed_smoke_does_not_create_output(checkpoint, monkeypatch):
         entry.main(["--model_path", str(checkpoint), "--limit", "4"])
     assert not list(checkpoint.glob("zeroshot*"))
 
-@pytest.mark.parametrize('profile', ['mmlu_5shot','gsm8k_0shot'])
+@pytest.mark.parametrize('profile', ['mmlu_5shot','gsm8k_5shot'])
 @pytest.mark.parametrize('batch_args,expected_batch,expected_cap', [([], 'auto', None), (['--batch_size','2','--max_batch_size','4'], 2, 4)])
 def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, profile, batch_args, expected_batch, expected_cap):
     from gemq import supplemental
     from test_supplemental import raw_result
     raw=raw_result(profile)
     if expected_cap is None:
-        expected_cap = {'mmlu_5shot': 17, 'gsm8k_0shot': 96}[profile]
+        expected_cap = {'mmlu_5shot': 60, 'gsm8k_5shot': 96}[profile]
     _, wrapper = mock_harness(monkeypatch,raw)
     monkeypatch.setattr(supplemental,'version',lambda _: '0.4.13')
     model=Mock();model.config=SimpleNamespace(model_type='qwen3_moe')
@@ -297,7 +297,7 @@ def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, pro
     assert wrapper.call_args.kwargs['batch_size'] == expected_batch
     assert wrapper.call_args.kwargs['max_batch_size'] == expected_cap
     result=json.loads((checkpoint/(profile+'.json')).read_text())
-    assert result['protocol']['num_fewshot']==(5 if profile=='mmlu_5shot' else 0)
+    assert result['protocol']['num_fewshot']==5
     assert result['experiment']['num_fewshot']==result['protocol']['num_fewshot']
     assert 'seven_task_average' not in result['summary']
     assert log.exists() and result['experiment']['log_path']==str(log)

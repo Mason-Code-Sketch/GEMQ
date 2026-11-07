@@ -11,7 +11,7 @@ from gemq import supplemental as protocol
 
 def tiny(kind):
     shared=dict(vocab_size=16,hidden_size=16,num_hidden_layers=1,num_attention_heads=2,
-                num_key_value_heads=2,max_position_embeddings=1024,bos_token_id=1,eos_token_id=1,pad_token_id=1)
+                num_key_value_heads=2,max_position_embeddings=2048,bos_token_id=1,eos_token_id=1,pad_token_id=1)
     if kind=='deepseek_v2':
         cfg=transformers.DeepseekV2Config(**shared,intermediate_size=32,moe_intermediate_size=16,
             n_routed_experts=4,n_shared_experts=1,num_experts_per_tok=2,q_lora_rank=8,
@@ -29,7 +29,7 @@ def tiny(kind):
     model=AutoModelForCausalLM.from_config(cfg).float().eval()
     tok=Tokenizer(models.WordLevel({'[UNK]':0,'[EOS]':1,'Question':2,'Answer':3,':':4,'A':5,'B':6,'C':7,'D':8,'1':9,'2':10,'####':11},unk_token='[UNK]'))
     tok.pre_tokenizer=pre_tokenizers.Whitespace()
-    tok=PreTrainedTokenizerFast(tokenizer_object=tok,unk_token='[UNK]',eos_token='[EOS]',pad_token='[EOS]',model_max_length=1024)
+    tok=PreTrainedTokenizerFast(tokenizer_object=tok,unk_token='[UNK]',eos_token='[EOS]',pad_token='[EOS]',model_max_length=2048)
     return model,tok
 
 
@@ -48,11 +48,11 @@ def test_real_harness_gsm8k_generation(kind):
     # Real harness, YAML templates, extraction filters, model.generate and forward.
     # Synthetic datasets avoid downloading benchmark data or measuring model quality.
     with patch('datasets.load_dataset',side_effect=dataset):
-        result=protocol.evaluate(model,tok,'gsm8k_0shot',batch_size=1,limit=1)
-    assert result['protocol']['num_fewshot']==0
+        result=protocol.evaluate(model,tok,'gsm8k_5shot',batch_size=1,limit=1)
+    assert result['protocol']['num_fewshot']==5
     assert result['protocol']['status']=='smoke'
     assert result['summary']['sample_counts']=={'gsm8k':1}
-    assert result['harness']['configs']['gsm8k']['generation_kwargs']['max_gen_toks']==256
+    assert result['harness']['configs']['gsm8k']['generation_kwargs']['max_gen_toks']==1024
 
 
 def test_real_harness_mmlu_five_shot():
@@ -64,7 +64,7 @@ def test_real_harness_mmlu_five_shot():
     assert result['protocol']['status']=='smoke'
 
 
-@pytest.mark.parametrize('profile', ['mmlu_5shot', 'gsm8k_0shot'])
+@pytest.mark.parametrize('profile', ['mmlu_5shot', 'gsm8k_5shot'])
 def test_real_harness_auto_batch(profile):
     model, tok = tiny('qwen3_moe')
     with patch('datasets.load_dataset', side_effect=dataset):
@@ -73,10 +73,11 @@ def test_real_harness_auto_batch(profile):
     assert result['protocol']['max_batch_size'] == 2
     assert result['protocol']['status'] == 'smoke'
     assert set(result['summary']['sample_counts'].values()) == {2}
-    if profile == 'gsm8k_0shot':
+    if profile == 'gsm8k_5shot':
         probe = result['protocol']['generation_batch_probes'][0]
-        assert probe['probe_tokens'] == len(tok.encode('Question: Question 1\nAnswer:', add_special_tokens=False)) + 256
-        assert probe['model_max_length'] == 1024
+        assert probe['max_input_tokens'] > len(tok.encode('Question: Question 1\nAnswer:', add_special_tokens=False))
+        assert probe['probe_tokens'] == probe['max_input_tokens'] + 1024
+        assert probe['model_max_length'] == 2048
         assert probe['selected_batch_size'] == 2
     else:
         assert result['protocol']['generation_batch_probes'] == []

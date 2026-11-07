@@ -63,11 +63,11 @@ def parse_args(argv=None):
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "grouped_cached", "triton"), default="auto",
                         help="auto selects resident grouped_mm for the four supported FP16/BF16 MoE families; "
                              "triton explicitly requests GEMQ fused kernels")
-    parser.add_argument("--evaluation", choices=("seven", "mmlu_5shot", "gsm8k_0shot"), default="seven")
+    parser.add_argument("--evaluation", choices=("seven", "mmlu_5shot", "gsm8k_5shot"), default="seven")
     parser.add_argument("--log-path", type=Path, help="Explicit batch log path; defaults beside result")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default="auto", help="Batch size (default: auto)")
-    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap by model (seven/MMLU5shot/GSM0shot): Mixtral=34/8/48; others=51/17/96")
+    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap by model (seven/MMLU5shot/GSM5shot): Mixtral=34/8/48; others=51/17/96")
     parser.add_argument("--max_length", type=positive_int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include_gsm8k", action="store_true")
@@ -76,12 +76,12 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     args._max_batch_size_explicit = args.max_batch_size is not None
     if args.max_batch_size is None:
-        args.max_batch_size = {"seven": 51, "mmlu_5shot": 17, "gsm8k_0shot": 96}[args.evaluation]
+        args.max_batch_size = {"seven": 51, "mmlu_5shot": 17, "gsm8k_5shot": 96}[args.evaluation]
     if args.evaluation != "seven":
         if args.tasks != list(ZEROSHOT_TASKS) or args.include_gsm8k:
             parser.error("supplemental --evaluation cannot be combined with --tasks or --include_gsm8k")
         args.tasks = ["mmlu"] if args.evaluation == "mmlu_5shot" else []
-        args.include_gsm8k = args.evaluation == "gsm8k_0shot"
+        args.include_gsm8k = args.evaluation == "gsm8k_5shot"
     if args.limit is not None and args.log_path is not None:
         parser.error("smoke tests report to terminal; do not set --log-path")
     if len(set(args.tasks)) != len(args.tasks):
@@ -312,7 +312,7 @@ def main(argv=None):
                 "layer_devices": args.layer_devices,
                 "backend": args.backend,
                 "tasks": args.tasks, "include_gsm8k": args.include_gsm8k,
-                "num_fewshot": 5 if args.evaluation == "mmlu_5shot" else 0, "apply_chat_template": False, "add_bos_token": False,
+                "num_fewshot": 5 if args.evaluation != "seven" else 0, "apply_chat_template": False, "add_bos_token": False,
                 "batch_size": args.batch_size, "max_length": args.max_length,
                 "max_batch_size": args.max_batch_size,
                 "seed": args.seed, "wall_seconds": elapsed,
