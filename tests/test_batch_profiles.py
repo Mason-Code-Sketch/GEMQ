@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import pytest
 from gemq.batch_profiles import auto_batch_cap, resolve_cli_batch_cap
 
-@pytest.mark.parametrize("model_type,caps", [("mixtral", [34, 13, 48]), ("deepseek_v2", [8, 24, 128]), ("qwen2_moe", [12, 24, 128]), ("qwen3_moe", [51, 60, 96]), ("unknown", [51, 17, 96])])
+@pytest.mark.parametrize("model_type,caps", [("mixtral", [34, 13, 48]), ("deepseek_v2", [32, 24, 128]), ("qwen2_moe", [32, 24, 128]), ("qwen3_moe", [51, 60, 96]), ("unknown", [51, 17, 96])])
 def test_model_profiles_and_explicit_override(model_type, caps):
     model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
     for profile, cap in zip(["seven", "mmlu_5shot", "gsm8k_0shot"], caps):
@@ -24,7 +24,7 @@ from unittest.mock import Mock
 from gemq import eval_zeroshot as entry
 from test_eval_zeroshot import mock_harness, results
 
-@pytest.mark.parametrize("model_type,cap", [("mixtral", 34), ("deepseek_v2", 8), ("qwen2_moe", 12), ("qwen3_moe", 51)])
+@pytest.mark.parametrize("model_type,cap", [("mixtral", 34), ("deepseek_v2", 32), ("qwen2_moe", 32), ("qwen3_moe", 51)])
 @pytest.mark.parametrize("explicit", [None, 51])
 def test_loaded_model_cap_reaches_harness_and_saved_result(tmp_path, monkeypatch, model_type, cap, explicit):
     checkpoint = tmp_path / "arbitrary-name"
