@@ -67,7 +67,7 @@ def parse_args(argv=None):
     parser.add_argument("--log-path", type=Path, help="Explicit batch log path; defaults beside result")
     parser.add_argument("--tasks", nargs="+", choices=ZEROSHOT_TASKS, default=list(ZEROSHOT_TASKS))
     parser.add_argument("--batch_size", type=batch_size, default="auto", help="Batch size (default: auto)")
-    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap by model (seven/MMLU5shot/GSM5shot): Mixtral=34/8/48; others=51/17/96")
+    parser.add_argument("--max_batch_size", type=positive_int, default=None, help="Auto batch cap by model (seven/MMLU5shot/GSM5shot): DeepSeek-V2=32/24/20; Qwen1.5-MoE=32/24/56; Mixtral=34/10/13; Qwen3-MoE=51/59/84; others=51/17/96")
     parser.add_argument("--max_length", type=positive_int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include_gsm8k", action="store_true")

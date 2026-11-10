@@ -25,13 +25,13 @@ The loaded model config selects the auto cap. An explicit maximum batch argument
 
 | Loaded `model_type` | Seven tasks | MMLU 5-shot | GSM8K 5-shot |
 |---|---:|---:|---:|
-| `deepseek_v2` | 32 | 24 | 128 |
-| `qwen2_moe` | 32 | 24 | 128 |
-| `mixtral` | 34 | 13 | 48 |
-| `qwen3_moe` | 51 | 60 | 96 |
+| `deepseek_v2` | 32 | 24 | 20 |
+| `qwen2_moe` | 32 | 24 | 56 |
+| `mixtral` | 34 | 10 | 13 |
+| `qwen3_moe` | 51 | 59 | 84 |
 | Other models | 51 | 17 | 96 |
 
-DeepSeek-V2-Lite and Qwen1.5-MoE-A2.7B defaults are initial estimates for four 24 GB RTX 4090 cards with decoder layers resident across the cards. Selection uses `model_type`, without hardware detection. Historical GEMQ `grouped_cached` seven-task runs completed at batch 8 for both models; Qwen1.5 batch 12 and both models' MMLU/GSM caps remain estimates pending GPU validation. Different backends or placement may need an explicit cap. Mixtral 34 passed complete KDMoQ seven-task evaluation; its 13 and 48 caps remain estimates. Tasks, few-shot settings and generation budgets are unchanged.
+DeepSeek-V2-Lite and Qwen1.5-MoE-A2.7B defaults are initial estimates for four 24 GB RTX 4090 cards with decoder layers resident across the cards. Selection uses `model_type`, without hardware detection. Historical GEMQ `grouped_cached` seven-task runs completed at batch 8 for both models; Qwen1.5 batch 12 and both models' MMLU/GSM caps remain estimates pending GPU validation. Different backends or placement may need an explicit cap. Mixtral 34 passed complete KDMoQ seven-task evaluation. Tasks, few-shot settings and generation budgets are unchanged.
 
 
 ### MMLU scored positions
@@ -42,4 +42,4 @@ Qwen1.5 MMLU temporarily disables KV caching and restores the original setting o
 
 DeepSeek checkpoint-provided implementations use a temporary output-head input hook during compact scoring, retaining their original decoder and FP32 logits cast. The hook is removed even on errors. This path is CPU correctness-tested; full-model DeepSeek GPU memory savings remain unmeasured.
 
-MMLU caps: DeepSeek-V2 24 and Qwen1.5-MoE 24 for four RTX 4090 cards; Qwen3-MoE 60 and Mixtral 13 for DGX Spark. These are estimated auto upper limits, not GPU-validated capacities. Other profiles and explicit overrides are unchanged.
+DeepSeek-V2 and Qwen1.5-MoE MMLU caps remain 24 for four RTX 4090 cards and remain estimates. DGX Spark auto caps (MMLU 5-shot / GSM8K 5-shot) are Qwen3-MoE 59 / 84 and Mixtral 10 / 13. These are upper limits for automatic probing; explicit overrides are unchanged.

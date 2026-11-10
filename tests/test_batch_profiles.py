@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import pytest
 from gemq.batch_profiles import auto_batch_cap, resolve_cli_batch_cap
 
-@pytest.mark.parametrize("model_type,caps", [("mixtral", [34, 13, 48]), ("deepseek_v2", [32, 24, 20]), ("qwen2_moe", [32, 24, 56]), ("qwen3_moe", [51, 60, 96]), ("unknown", [51, 17, 96])])
+@pytest.mark.parametrize("model_type,caps", [("mixtral", [34, 10, 13]), ("deepseek_v2", [32, 24, 20]), ("qwen2_moe", [32, 24, 56]), ("qwen3_moe", [51, 59, 84]), ("unknown", [51, 17, 96])])
 def test_model_profiles_and_explicit_override(model_type, caps):
     model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
     for profile, cap in zip(["seven", "mmlu_5shot", "gsm8k_5shot"], caps):

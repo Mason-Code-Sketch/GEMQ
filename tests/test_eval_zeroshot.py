@@ -285,7 +285,7 @@ def test_supplemental_output_and_external_batch_log(checkpoint, monkeypatch, pro
     from test_supplemental import raw_result
     raw=raw_result(profile)
     if expected_cap is None:
-        expected_cap = {'mmlu_5shot': 60, 'gsm8k_5shot': 96}[profile]
+        expected_cap = {'mmlu_5shot': 59, 'gsm8k_5shot': 84}[profile]
     _, wrapper = mock_harness(monkeypatch,raw)
     monkeypatch.setattr(supplemental,'version',lambda _: '0.4.13')
     model=Mock();model.config=SimpleNamespace(model_type='qwen3_moe')
