@@ -36,6 +36,40 @@ def pack_weight(weight):
 
 from gemq.inference.grouped_cached import GroupedCachedExperts
 
+def _bind_packed_forward(module, records, stats, top_k, grouped_mm, unpack_weight):
+    """Keep native routing/accumulation; specialize only projection execution.
+
+    Qwen3 and Mixtral routers use topk without replacement. Consequently an
+    expert receives at most one row per input token, including skewed routing.
+    The configured top-k must match the actual routed tensor on every call.
+    """
+    native = GroupedCachedExperts.forward
+
+    def linear(inputs, weight, offsets):
+        codes, levels, width = records[id(weight)]
+        if inputs.shape[0] % top_k:
+            raise ValueError("Routed row count must be divisible by top-k")
+        if inputs.shape[0] <= 2048:
+            stats["decode_calls"] += 1
+            return grouped_mm(inputs, codes, levels, offsets,
+                              max_rows_per_expert=inputs.shape[0] // top_k)
+        stats["prefill_calls"] += 1
+        dense = unpack_weight(codes, levels, width)
+        return torch._grouped_mm(inputs, dense.transpose(1, 2), offs=offsets)
+
+    private_forward = FunctionType(
+        native.__code__, {**native.__globals__, "_linear": linear},
+        native.__name__, native.__defaults__, native.__closure__,
+    )
+
+    def forward(self, hidden, indices, weights):
+        if indices.ndim != 2 or indices.shape != (hidden.shape[0], top_k):
+            raise ValueError("Router top-k does not match the packed launch bound")
+        return private_forward(self, hidden, indices, weights)
+
+    module.forward = MethodType(forward, module)
+
+
 @torch.no_grad()
 def prepare_packed_generation(wrapped):
     """Compress resident grouped experts for Qwen3/Mixtral GSM8K only."""
@@ -52,8 +86,14 @@ def prepare_packed_generation(wrapped):
     modules = [m for m in model.modules() if isinstance(m, GroupedCachedExperts)]
     if not modules:
         return stats
+    # The bound relies on the supported routers selecting distinct experts.
+    top_k = getattr(model.config, "num_experts_per_tok", None)
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
+        raise ValueError("Packed generation requires a positive integer router top-k")
     names_by_module = []
     for module in modules:
+        if top_k > module.num_experts or module.fp32_topk:
+            raise ValueError("Unsupported router contract for packed generation")
         names = ("gate_up_proj", "down_proj") if hasattr(module, "gate_up_proj") else ("gate_proj", "up_proj", "down_proj")
         for name in names:
             w = getattr(module, name)
@@ -63,7 +103,6 @@ def prepare_packed_generation(wrapped):
                 raise ValueError("Unsupported grouped expert weight layout")
         names_by_module.append(names)
     from gemq.packed_generation_kernels import grouped_mm, unpack_weight
-    native = GroupedCachedExperts.forward
     for module, names in zip(modules, names_by_module):
         records = {}
         for name in names:
@@ -79,19 +118,7 @@ def prepare_packed_generation(wrapped):
             stats["converted"] += 1
             del weight
             torch.cuda.empty_cache()
-        def linear(inputs, weight, offsets, *, registry=records):
-            codes, levels, width = registry[id(weight)]
-            if inputs.shape[0] <= 2048:
-                stats["decode_calls"] += 1
-                # Every routed row is a safe upper bound, including repeated experts.
-                return grouped_mm(inputs, codes, levels, offsets,
-                                  max_rows_per_expert=inputs.shape[0])
-            stats["prefill_calls"] += 1
-            dense = unpack_weight(codes, levels, width)
-            return torch._grouped_mm(inputs, dense.transpose(1, 2), offs=offsets)
-        forward = FunctionType(native.__code__, {**native.__globals__, "_linear": linear},
-                               native.__name__, native.__defaults__, native.__closure__)
-        module.forward = MethodType(forward, module)
+        _bind_packed_forward(module, records, stats, top_k, grouped_mm, unpack_weight)
     stats.update(enabled=True, backend="fp16_bf16_lut_grouped_v1", weight_bits_verified=True)
     model._packed_generation_stats = stats
     return stats
