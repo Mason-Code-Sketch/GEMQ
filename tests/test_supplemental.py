@@ -53,7 +53,7 @@ def test_smoke_is_distinct(profile):
 
 
 @pytest.mark.parametrize('profile', list(protocol.PROFILES))
-@pytest.mark.parametrize('model_type', ['deepseek_v2', 'qwen2_moe', 'qwen3_moe', 'mixtral'])
+@pytest.mark.parametrize('model_type', ['deepseek_v2', 'qwen2_moe', 'qwen3_moe', 'mixtral', 'unknown'])
 @pytest.mark.parametrize('explicit', [None, 5])
 def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     raw=raw_result(profile); call=Mock(return_value=raw); hf=Mock()
@@ -64,7 +64,8 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     model=Mock(); model.config=SimpleNamespace(model_type=model_type,use_cache=True)
     def evaluate_callback(**kwargs):
         expected_cache = not (model_type == 'deepseek_v2' or
-                              profile == 'mmlu_5shot')
+                              (profile == 'mmlu_5shot' and model_type in
+                               {'qwen2_moe', 'qwen3_moe', 'mixtral'}))
         assert model.config.use_cache is expected_cache
         return raw
     call.side_effect = evaluate_callback

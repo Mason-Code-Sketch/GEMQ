@@ -204,3 +204,23 @@ def test_scoring_and_five_probe_calls_disable_checkpoint_kv_cache(kind):
         assert model.config.use_cache is True
     finally:
         hook.remove()
+
+
+@pytest.mark.parametrize('kind', ['qwen2', 'deepseek', 'deepseek_legacy'])
+def test_other_models_keep_existing_cache_call_contract(kind):
+    model = fixture_model(kind)
+    h = harness(model, 'auto', True)
+    h.max_batch_size = 2
+    seen = []
+    def inspect(_model, args, kwargs):
+        assert 'use_cache' not in kwargs
+        seen.append(args[0].shape[0])
+    hook = model.register_forward_pre_hook(inspect, with_kwargs=True)
+    requests = [(('ctx', 'A'), [1, 2, 3, 4], [21])]
+    try:
+        with compact_mmlu_scoring(h):
+            assert h._detect_batch_size(requests) == 2
+            h._loglikelihood_tokens(requests, disable_tqdm=True, override_bs=1)
+        assert len(seen) == 6
+    finally:
+        hook.remove()
