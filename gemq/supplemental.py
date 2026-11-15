@@ -69,6 +69,10 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
     wrapped = HFLM(pretrained=model, tokenizer=tokenizer, backend="causal",
                    batch_size=batch_size, max_batch_size=max_batch_size,
                    max_length=max_length, add_bos_token=False, parallelize=False)
+    generation_experts = None
+    if task == "gsm8k":
+        from gemq.packed_generation import prepare_packed_generation
+        generation_experts = prepare_packed_generation(wrapped)
     batch_probes = []
     if task == "gsm8k":
         from gemq.generation_batch import install_generation_batch_probe
@@ -109,6 +113,7 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
         "add_bos_token": False, "apply_chat_template": False,
         "batch_size": batch_size, "max_batch_size": max_batch_size,
         "max_length": max_length, "generation_kwargs": generation,
+        "generation_experts": generation_experts,
         "generation_batch_probes": batch_probes,
         "generation_logits": generation_logits,
         "mmlu_scored_positions": scoring,
