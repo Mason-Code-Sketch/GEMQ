@@ -181,3 +181,26 @@ def test_compact_probe_five_forwards_halves_oom_and_restores(kind):
         assert all(shape[1]<=shape[0] for shape in seen)
     finally:
         hook.remove()
+
+
+@pytest.mark.parametrize('kind', ['qwen3', 'mixtral'])
+def test_scoring_and_five_probe_calls_disable_checkpoint_kv_cache(kind):
+    model = fixture_model(kind)
+    model.config.use_cache = True
+    h = harness(model, 'auto', True)
+    h.max_batch_size = 2
+    seen = []
+    def inspect(_model, args, kwargs, output):
+        assert kwargs['use_cache'] is False
+        assert output.past_key_values is None
+        seen.append(args[0].shape[0])
+    hook = model.register_forward_hook(inspect, with_kwargs=True)
+    requests = [(('ctx', 'A'), [1, 2, 3, 4], [21])]
+    try:
+        with compact_mmlu_scoring(h):
+            assert h._detect_batch_size(requests) == 2
+            h._loglikelihood_tokens(requests, disable_tqdm=True, override_bs=1)
+        assert len(seen) == 6
+        assert model.config.use_cache is True
+    finally:
+        hook.remove()

@@ -64,7 +64,7 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     model=Mock(); model.config=SimpleNamespace(model_type=model_type,use_cache=True)
     def evaluate_callback(**kwargs):
         expected_cache = not (model_type == 'deepseek_v2' or
-                              (model_type == 'qwen2_moe' and profile == 'mmlu_5shot'))
+                              profile == 'mmlu_5shot')
         assert model.config.use_cache is expected_cache
         return raw
     call.side_effect = evaluate_callback

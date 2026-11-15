@@ -40,7 +40,7 @@ def compact_mmlu_scoring(wrapped):
                 enabled=self.mixed_precision_dtype is not None):
             hook = head.register_forward_pre_hook(select_positions)
             try:
-                logits = self.model(padded).logits
+                logits = self.model(padded, use_cache=False).logits
             finally:
                 hook.remove()
             rows = torch.arange(padded.shape[0], device=logits.device)

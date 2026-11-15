@@ -82,7 +82,7 @@ def evaluate(model, tokenizer, profile, *, seed=0, batch_size="auto",
     kwargs = {"gen_kwargs": generation} if generation is not None else {}
     config = getattr(model, "config", None)
     disable_cache = (getattr(config, "model_type", None) == "deepseek_v2"
-                     or (task == "mmlu" and getattr(config, "model_type", None) == "qwen2_moe"))
+                     or task == "mmlu")
     previous_cache = getattr(config, "use_cache", None)
     if disable_cache:
         config.use_cache = False
