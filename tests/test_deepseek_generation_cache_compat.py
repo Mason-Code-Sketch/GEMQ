@@ -49,3 +49,16 @@ def test_compat_does_not_keep_generation_cache_alive():
     m.prepare_inputs_for_generation(torch.ones((1,2),dtype=torch.long),past_key_values=c)
     del c
     assert weak() is None
+
+
+def test_explicit_full_prefix_positions_are_sliced_for_decode():
+    class Positioned(Legacy):
+        __module__='transformers_modules.test_deepseek'
+        def prepare_inputs_for_generation(self,input_ids,past_key_values=None,**kwargs):
+            return {'input_ids':input_ids[:,past_key_values.seen_tokens:],
+                    'position_ids':kwargs['position_ids'],'past_key_values':past_key_values}
+    m=Positioned();install_deepseek_generation_cache_compat(m);c=DynamicCache()
+    k=torch.zeros(1,2,5,3);c.update(k,k,0)
+    p=m.prepare_inputs_for_generation(torch.arange(6)[None],past_key_values=c,position_ids=torch.arange(10,16)[None])
+    assert p['input_ids'].tolist()==[[5]] and p['position_ids'].tolist()==[[15]]
+    assert p['past_key_values'] is c
