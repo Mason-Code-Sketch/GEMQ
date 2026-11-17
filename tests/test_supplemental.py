@@ -79,8 +79,8 @@ def test_real_interface_arguments(monkeypatch,profile,model_type,explicit):
     caps = {
         'qwen3_moe': {'mmlu_5shot': 60, 'gsm8k_5shot': 96},
         'mixtral': {'mmlu_5shot': 13, 'gsm8k_5shot': 48},
-        'deepseek_v2': {'mmlu_5shot': 24, 'gsm8k_5shot': 128},
-        'qwen2_moe': {'mmlu_5shot': 24, 'gsm8k_5shot': 128},
+        'deepseek_v2': {'mmlu_5shot': 24, 'gsm8k_5shot': 20},
+        'qwen2_moe': {'mmlu_5shot': 24, 'gsm8k_5shot': 56},
     }.get(model_type, {'mmlu_5shot': 17, 'gsm8k_5shot': 96})
     expected = explicit if explicit is not None else caps[profile]
     assert hf.call_args.kwargs['max_batch_size'] == expected
