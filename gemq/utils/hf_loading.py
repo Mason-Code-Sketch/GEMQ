@@ -61,6 +61,43 @@ def ensure_deepseek_v2_remote_code_compat():
     import_utils.is_torch_fx_available = is_torch_fx_available
 
 
+def install_deepseek_generation_cache_compat(model):
+    """Adapt only legacy DeepSeek generation's unbounded dynamic-cache calls.
+
+    Cache tensors and their update implementation remain owned by Transformers.
+    Refresh seen_tokens before every prepare call; layer-local usable lengths
+    come from the cache, so decode never reuses layer zero's updated length.
+    """
+    from types import MethodType
+    from weakref import ref
+    from transformers.cache_utils import DynamicCache
+
+    if (getattr(model.config, "model_type", None) != "deepseek_v2"
+            or not type(model).__module__.startswith("transformers_modules.")
+            or getattr(model, "_gemq_legacy_cache_compat", False)):
+        return False
+    original = model.prepare_inputs_for_generation
+
+    def prepare(self, input_ids, past_key_values=None, **kwargs):
+        cache = past_key_values
+        if isinstance(cache, DynamicCache):
+            if any(getattr(cache, "is_sliding", [])) or getattr(cache, "offloading", False):
+                raise ValueError("Legacy DeepSeek requires an unbounded resident DynamicCache")
+            # Old remote modeling code queries these removed APIs before forward.
+            if not hasattr(type(cache), "seen_tokens"):
+                cache.seen_tokens = cache.get_seq_length()
+            cache.get_max_length = lambda: None
+            if not hasattr(cache, "get_usable_length"):
+                cache_ref = ref(cache)
+                cache.get_usable_length = (
+                    lambda new_seq_length, layer_idx=0: cache_ref().get_seq_length(layer_idx))
+        return original(input_ids, past_key_values=past_key_values, **kwargs)
+
+    model.prepare_inputs_for_generation = MethodType(prepare, model)
+    model._gemq_legacy_cache_compat = True
+    return True
+
+
 def normalize_legacy_tied_weights_for_serialization(model):
     """Adapt untied remote-code models to Transformers 5 serialization."""
     for module in model.modules():
@@ -138,6 +175,8 @@ def load_quantized_model(
         config = transformers.AutoConfig.from_pretrained(
             model_path, trust_remote_code=trust_remote_code
         )
+        if getattr(config, "model_type", None) == "deepseek_v2":
+            ensure_deepseek_v2_remote_code_compat()
         hqq_model_cls = (
             FusedMoeHQQModel
             if (getattr(config, QWEN2_HQQ_EXPERTS_CONFIG_KEY, False)
@@ -147,6 +186,7 @@ def load_quantized_model(
         model = hqq_model_cls.from_quantized(
             model_path, compute_dtype=compute_dtype, device=device
         )
+    install_deepseek_generation_cache_compat(model)
     return model
 
 
