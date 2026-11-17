@@ -62,7 +62,15 @@ def install_deepseek_generation_cache_compat(model):
                 cache_ref = ref(cache)
                 cache.get_usable_length = (
                     lambda new_seq_length, layer_idx=0: cache_ref().get_seq_length(layer_idx))
-        return original(input_ids, past_key_values=past_key_values, **kwargs)
+        prepared = original(input_ids, past_key_values=past_key_values, **kwargs)
+        # New GenerationMixin supplies position_ids for the full prefix. Legacy
+        # DeepSeek only slices IDs it creates itself, leaving provided IDs long.
+        if isinstance(prepared, dict) and cache is not None:
+            positions = prepared.get("position_ids")
+            tokens = prepared.get("input_ids")
+            if positions is not None and tokens is not None:
+                prepared["position_ids"] = positions[:, -tokens.shape[1]:]
+        return prepared
 
     model.prepare_inputs_for_generation = MethodType(prepare, model)
     model._gemq_legacy_cache_compat = True
