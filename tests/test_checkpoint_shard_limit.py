@@ -14,13 +14,13 @@ from gemq.utils.hf_loading import normalize_legacy_tied_weights_for_serializatio
 def production_save():
     source = Path(__file__).resolve().parents[1] / "gemq" / "quantize.py"
     module = ast.parse(source.read_text())
-    function = next(node for node in module.body if isinstance(node, ast.FunctionDef)
-                    and node.name == "save_quantized_model")
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef)
+                 and node.name in ("save_quantized_model", "cast_model_preserving_grid")]
     hqq = SimpleNamespace(save_quantized=Mock())
     namespace = dict(torch=torch, AutoHQQHFModel=hqq, custom_object_save=Mock(),
                      normalize_legacy_tied_weights_for_serialization=
                      normalize_legacy_tied_weights_for_serialization)
-    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
     return namespace["save_quantized_model"], hqq
 
 

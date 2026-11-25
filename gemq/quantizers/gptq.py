@@ -18,7 +18,7 @@ def _search_factors(x, mcmoe_rules):
 
 
 class MCMoeGPTQWeightQuantizer(nn.Module):
-    """Aligned GPTQ retaining native MC-MoE parameter arithmetic precision."""
+    """GPTQ with FP32 parameter arithmetic and the configured MC-MoE rules."""
 
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
@@ -51,7 +51,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         self.rows = x.shape[0]     # N_filters
         self.columns = x.shape[1]  # N_feat_dim
         self.W = x.clone()
-        self.H = torch.zeros((self.columns, self.columns), device=x.device)
+        self.H = torch.zeros((self.columns, self.columns), device=x.device, dtype=torch.float32)
         self.nsamples = 0
 
         if self.groupsize <= 0 or self.columns % self.groupsize:
@@ -80,7 +80,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         """
         Find quantization parameters (scales zero-points, and max_int) for a tensor.
         """
-        x = x.to(self.W.dtype)
+        x = x.float()
 
         max_int = 2 ** self.nbits - 1
         if max_int == 1:
@@ -88,7 +88,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             zeros = 0.5 * torch.ones_like(scales)
             return scales, zeros, max_int
 
-        tmp = torch.zeros(x.shape[0], 1, dtype=self.W.dtype, device=x.device)  # (N_filter,1)
+        tmp = torch.zeros(x.shape[0], 1, dtype=torch.float32, device=x.device)  # (N_filter,1)
         min_val = torch.minimum(x.amin(dim=1, keepdim=True), tmp)  # (N_filter,1)
         max_val = torch.maximum(x.amax(dim=1, keepdim=True), tmp)  # (N_filter,1)
         
@@ -102,7 +102,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         if self.mse:
             norm = 2.4
 
-            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=self.W.dtype)
+            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=torch.float32)
             factors = _search_factors(x, self.mcmoe_rules)
             for p in factors:
                 minv = p * min_val
@@ -156,8 +156,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         if self.nbits == 0:
             num_groups = self.W.numel() // self.groupsize if self.groupsize > 0 else self.W.shape[0]
             Q = torch.zeros_like(self.W).reshape(num_groups, -1)
-            scales = torch.ones(num_groups, 1, dtype=self.W.dtype, device=device)
-            zeros = torch.zeros(num_groups, 1, dtype=self.W.dtype, device=device)
+            scales = torch.ones(num_groups, 1, dtype=torch.float32, device=device)
+            zeros = torch.zeros(num_groups, 1, dtype=torch.float32, device=device)
             return Q, scales, zeros
         
 
@@ -231,7 +231,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         """
         Dequantize a quantized tensor using the given quantization parameters.
         """
-        return (Q - zeros) * scales
+        return ((Q.float() - zeros.float()) * scales.float()).to(self.W.dtype)
 
 
 class GPTQWeightQuantizer(nn.Module):
@@ -266,7 +266,7 @@ class GPTQWeightQuantizer(nn.Module):
         self.rows = x.shape[0]     # N_filters
         self.columns = x.shape[1]  # N_feat_dim
         self.W = x.clone()
-        self.H = torch.zeros((self.columns, self.columns), device=x.device)
+        self.H = torch.zeros((self.columns, self.columns), device=x.device, dtype=torch.float32)
         self.nsamples = 0
 
     def add_batch(self, inp):
@@ -295,6 +295,7 @@ class GPTQWeightQuantizer(nn.Module):
         """
         Find quantization parameters (scales zero-points, and max_int) for a tensor.
         """
+        x = x.float()
         max_int = 2 ** self.nbits - 1
         if max_int == 1:
             scales = torch.mean(torch.abs(x), dim=1, keepdim=True) * 2
@@ -366,8 +367,8 @@ class GPTQWeightQuantizer(nn.Module):
         if self.nbits == 0:
             num_groups = self.W.numel() // self.groupsize if self.groupsize > 0 else self.W.shape[0]
             Q = torch.zeros_like(self.W).reshape(num_groups, -1)
-            scales = torch.ones(num_groups, 1, dtype=self.W.dtype, device=device)
-            zeros = torch.zeros(num_groups, 1, dtype=self.W.dtype, device=device)
+            scales = torch.ones(num_groups, 1, dtype=torch.float32, device=device)
+            zeros = torch.zeros(num_groups, 1, dtype=torch.float32, device=device)
             return Q, scales, zeros
         
         
@@ -424,8 +425,8 @@ class GPTQWeightQuantizer(nn.Module):
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         if self.groupsize != -1:
-            scales = torch.cat(scales_list, dim=1).to(self.W.dtype)  # (N_filter, N_group)
-            zeros = torch.cat(zeros_list, dim=1).to(self.W.dtype)  # (N_filter, N_group)
+            scales = torch.cat(scales_list, dim=1)  # (N_filter, N_group)
+            zeros = torch.cat(zeros_list, dim=1)  # (N_filter, N_group)
 
             # reformat
             Q = Q.reshape(-1, self.groupsize) # (N_group, groupsize)
@@ -433,8 +434,6 @@ class GPTQWeightQuantizer(nn.Module):
             zeros = zeros.reshape(-1, 1)      # (N_group, 1)
 
         Q = Q.to(self.W.dtype)
-        scales = scales.to(self.W.dtype)
-        zeros = zeros.to(self.W.dtype)
 
         return Q, scales, zeros
 
@@ -442,4 +441,4 @@ class GPTQWeightQuantizer(nn.Module):
         """
         Dequantize a quantized tensor using the given quantization parameters.
         """
-        return (Q - zeros) * scales
+        return ((Q.float() - zeros.float()) * scales.float()).to(self.W.dtype)

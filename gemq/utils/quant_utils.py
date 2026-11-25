@@ -54,8 +54,23 @@ def build_alloc_cfg(model, args):
     return bit_cfg
 
 
+class FP32GridLinear(HQQLinear):
+    """Retain GPTQ grids on device moves and round only the reconstructed weight."""
+
+    def cuda(self, device):
+        scale, zero = self.meta["scale"], self.meta["zero"]
+        if scale.dtype != torch.float32 or zero.dtype != torch.float32:
+            raise ValueError("GEMQ requires a stored FP32 scale and zero")
+        super().cuda(device)
+        self.meta.update(scale=scale.to(device), zero=zero.to(device), compute_dtype=torch.float32)
+        return self
+
+    def dequantize(self):
+        return Quantizer.dequantize(self.W_q, self.meta).to(self.compute_dtype)
+
+
 def create_hqq_linear_from_quantized_weights(
-    W_q, scale, zero, org_shape, nbits, group_size, bias=None, device="cuda"
+    W_q, scale, zero, org_shape, nbits, group_size, bias=None, device="cuda", compute_dtype=None, packed=False
 ):
     """
     Create a HQQLinear layer from quantized weights without running on-the-fly HQQ quantization.
@@ -65,10 +80,9 @@ def create_hqq_linear_from_quantized_weights(
     # create a dummy HQQLinear layer
     # skip initialization (HQQ quantization) by passing a None linear_layer
     quant_config = BaseQuantizeConfig(nbits, group_size)
-    quant_layer = HQQLinear(None, quant_config, compute_dtype=W_q.dtype, device=device)
+    linear_cls = FP32GridLinear if scale.dtype == zero.dtype == torch.float32 else HQQLinear
+    quant_layer = linear_cls(None, quant_config, compute_dtype=compute_dtype or W_q.dtype, device=device)
     
-    # set W_q and meta
-    W_q = W_q.float()
 
     # store meta-data
     meta = {
@@ -86,7 +100,8 @@ def create_hqq_linear_from_quantized_weights(
 
     # pack bits
     meta["view_as_float"] = False
-    W_q = Quantizer.pack[meta["packing"]](W_q)
+    if not packed:
+        W_q = Quantizer.pack[meta["packing"]](W_q.float())
 
     # set attributes
     quant_layer.W_q = W_q
@@ -143,7 +158,10 @@ def replace_linears(model, model_name, quant_modules, quant_weight=True):
         nbits = m.quant_nbits.item()
         group_size = m.quant_groupsize.item()
 
-        if quant_weight:
+        packed = quant_weight and hasattr(m, "gemq_packed_codes")
+        if packed:
+            Q = m.gemq_packed_codes
+        elif quant_weight:
             num_groups = scales.shape[0]
             Q = torch.round(
                 W.view(num_groups, -1) / scales + zeros
@@ -154,7 +172,7 @@ def replace_linears(model, model_name, quant_modules, quant_weight=True):
         # Replace with HQQLinear
         device = m.weight.device if m.weight.is_cuda else "cuda"
         hqq_linear = create_hqq_linear_from_quantized_weights(
-            Q, scales, zeros, m.weight.shape, nbits, group_size, bias=m.bias, device=device
+            Q, scales, zeros, m.weight.shape, nbits, group_size, bias=m.bias, device=device, compute_dtype=W.dtype, packed=packed
         )
         setattr_nested(layers, name, hqq_linear)
 

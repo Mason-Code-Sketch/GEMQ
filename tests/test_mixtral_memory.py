@@ -109,7 +109,7 @@ def legacy_scores(block, inputs, outputs, gradients, batch_size):
         experts = [[e.w1.weight, e.w2.weight, e.w3.weight] for e in block.experts]
     originals = [[w.clone() for w in weights] for weights in experts]
     quantizers = {
-        (e, bit, j): MCMoeRTNWeightQuantizer(weight, bit)
+        (e, bit, j): MCMoeRTNWeightQuantizer(weight, bit, mcmoe_rules=True)
         for e, weights in enumerate(originals)
         for bit in (1, 2, 3) for j, weight in enumerate(weights)
     }

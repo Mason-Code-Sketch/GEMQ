@@ -175,16 +175,29 @@ def quantize_fused_expert_weights(moe_block, quantizers, args):
     return packed_states
 
 
+def cast_model_preserving_grid(model, dtype):
+    grids = [(module, key, module._buffers.pop(key))
+             for module in model.modules() for key in ("quant_scales", "quant_zeros")
+             if module._buffers.get(key) is not None]
+    try:
+        model.to(dtype)
+    finally:
+        for module, key, value in grids:
+            module._buffers[key] = value
+
+
 def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
     """
     Save the real/pseudo quantized model.
     """
     if real_quant:
+        if getattr(getattr(model, "config", None), "gemq_fp32_grid", False) is True:
+            model.config.dtype = next(model.parameters()).dtype
         tokenizer.save_pretrained(save_path)
         AutoHQQHFModel.save_quantized(model, save_path)
     else:
-        dtype = torch.float16 if save_dtype == "float16" else torch.bfloat16
-        model = model.to(dtype)
+        dtype = getattr(torch, save_dtype) if save_dtype else next(model.parameters()).dtype
+        cast_model_preserving_grid(model, dtype)
         normalize_legacy_tied_weights_for_serialization(model)
         tokenizer.save_pretrained(save_path)
         # Bound temporary CPU copies during safetensors serialization on unified memory.
@@ -230,7 +243,7 @@ def validate_checkpoint_paths(args):
             )
     if (
         args.real_quant
-        and getattr(args, "save_dtype", "float16") != "float16"
+        and getattr(args, "save_dtype", None) not in (None, getattr(args, "model_dtype", "float16"))
         and not args.fake_save_path
     ):
         raise ValueError(
@@ -261,7 +274,8 @@ def finalize_packed_checkpoint(model, tokenizer, args, resource_ledger):
     requested = getattr(args, "packed_ppl_backend", "auto")
     parameter = next(model.parameters())
     supported = (model.config.model_type == "qwen3_moe"
-                 and parameter.dtype == torch.float16 and parameter.is_cuda)
+                 and parameter.dtype == torch.float16 and parameter.is_cuda
+                 and not getattr(model.config, "gemq_fp32_grid", False))
     backend = ("triton" if supported else "pytorch") if requested == "auto" else requested
     accelerated = bool(args.eval_real_quant and backend == "triton")
     if accelerated and not supported:
@@ -352,7 +366,7 @@ def finetune_routers(model, dataloader, args):
     org_dtype = next(model.parameters()).dtype
 
     model.train()
-    model = model.to(torch.bfloat16)
+    cast_model_preserving_grid(model, torch.bfloat16)
 
     # prepare dataset
     input_ids = []
@@ -420,7 +434,7 @@ def finetune_routers(model, dataloader, args):
         release_unused_memory()
 
     # restore
-    model = model.to(org_dtype)
+    cast_model_preserving_grid(model, org_dtype)
     release_unused_memory()
 
 
@@ -428,7 +442,7 @@ def finetune_routers(model, dataloader, args):
 def quantize_weights_gptq(model, dataloader, args):
     """
     Perform mixed-precision weight-only quantization with GPTQ quantizer.
-    At the end of this function, the model weights are replaced with dequantized weights in fp16.
+    At the end of this function, the model weights are replaced with dequantized weights in the resident model dtype.
 
     NOTE: only supports single GPU quantization.
     """
@@ -545,7 +559,10 @@ def quantize_weights_gptq(model, dataloader, args):
             W = quantizers[name].dequantize(Q, scales, zeros)
 
             # replace weights and register quantization params
-            m.weight.data = W.reshape_as(m.weight.data)
+            m.weight.copy_(W.reshape_as(m.weight))
+            if getattr(args, "real_quant", False):
+                packing = Quantizer.bit_to_packing[quantizers[name].nbits]
+                m.gemq_packed_codes = Quantizer.pack[packing](Q).cpu()
             m.register_buffer("quant_scales", scales)
             m.register_buffer("quant_zeros", zeros)
             m.register_buffer("quant_nbits", torch.tensor(quantizers[name].nbits))
@@ -592,6 +609,7 @@ def quantize_weights_gptq(model, dataloader, args):
 
     model.config.use_cache = use_cache  # restore
 
+    model.config.gemq_fp32_grid = True
     return quant_modules, fused_packed_states
 
 
@@ -612,7 +630,7 @@ def parse_args():
         help="Name of the model; used to load model-specific modules",
     )
     parser.add_argument(
-        "--model_dtype", type=str, default="float16", choices=["auto", "float16", "bfloat16"],
+        "--model_dtype", type=str, default="bfloat16", choices=["auto", "float16", "bfloat16"],
         help="Data type of the model weights; use `auto` to load the model in the default dtype",
     )
     parser.add_argument(
@@ -721,7 +739,7 @@ def parse_args():
     )
     parser.add_argument(
         "--reproduce_mcmoe", action="store_true",
-        help="Use MC-MoE native parameter precision; Mixtral restores MC-MoE search and low-bit compensation rules"
+        help="Select the MC-MoE GPTQ solver with FP32 grid arithmetic; Mixtral retains its search and compensation rules"
     )
 
     # router fine-tuning args
@@ -790,7 +808,7 @@ def parse_args():
         help="Optional fake-quant checkpoint saved before real-weight packing",
     )
     parser.add_argument(
-        "--save_dtype", type=str, default="float16", choices=["float16", "bfloat16"],
+        "--save_dtype", type=str, default=None, choices=["float16", "bfloat16"],
         help="Data type for floating-point checkpoints; packed checkpoints retain native precision"
     )
     parser.add_argument(

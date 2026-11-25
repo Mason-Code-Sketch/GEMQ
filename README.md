@@ -65,12 +65,14 @@ activation checkpoints for the last 32 attention blocks (layers 16-47 in the
 48-layer model). The first attention block is excluded; experts are not
 checkpointed. Eager attention, samples, dtypes and AdamW settings are unchanged.
 The original attention forwards are restored after training or an exception.
-Training gradients and temporary tensors are released before restoring FP16.
+Training gradients and temporary tensors are released before restoring the model dtype.
 Unused allocator caches are cleared at phase boundaries, not on every step.
 After packing equivalence is checked, references to the old floating-point
 modules are released before packed-model evaluation and checkpoint saving.
 
-Packed PPL uses `--packed_ppl_backend auto` by default: Qwen3 FP16 on CUDA
+New checkpoints store GPTQ scale and zero in FP32 and decode in FP32 before rounding to the model dtype.
+Scoring uses group-wise floating-zero RTN with an error search at 2 and 3 bits.
+Packed PPL uses `--packed_ppl_backend auto` by default: legacy Qwen3 FP16 on CUDA
 uses the fused Triton expert path; other configurations use native HQQ.
 Use `--packed_ppl_backend pytorch` for the native HQQ reference. The fused
 path can introduce floating-point differences. Its native HQQ checkpoint is
@@ -89,7 +91,7 @@ Qwen3 FP16 with 128 sequences of 2048 tokens).
 On a single integrated CUDA device, Qwen3 LayerGrads also checkpoints the last
 32 attention blocks. `--attention_checkpoint_layers` overrides this count
 (`0` disables it; `48` covers all Qwen3 attention blocks, including the first).
-Experts, eager attention, FP16, calibration samples and output-gradient format
+Experts, eager attention, model dtype, calibration samples and output-gradient format
 are unchanged. Attention forwards are restored on success and failure.
 
 LayerRE supports `--forward_batch_size` for batched candidate evaluation, including
@@ -122,7 +124,7 @@ after storing its weights and packing metadata, without changing calibration.
 On a single integrated CUDA device, Mixtral LayerGrads checkpoints all 32
 attention blocks by default; `--attention_checkpoint_layers` still overrides it.
 Router fine-tuning checkpoints the 31 attention blocks after the first router.
-Experts are not checkpointed. Statistics and quantization remain FP16; router
+Experts are not checkpointed. Statistics and quantization load BF16 weights by default; router
 fine-tuning remains BF16 and restores the original dtype afterward. Full-model
 memory and CUDA numerical equivalence require validation before a formal run.
 

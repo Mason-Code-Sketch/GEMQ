@@ -23,8 +23,7 @@ def test_mixtral_columnwise_reference(cls, bits, dtype):
     expected = _columnwise(solver)
     actual = solver.quantize()
     for a, e in zip(actual, expected):
-        # The FP32 solver retains its existing cast to resident storage dtype.
-        torch.testing.assert_close(a, e.to(dtype) if cls is GPTQWeightQuantizer else e, rtol=0, atol=0)
+        torch.testing.assert_close(a, e, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("cls", [GPTQWeightQuantizer, MCMoeGPTQWeightQuantizer])
