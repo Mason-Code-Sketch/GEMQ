@@ -4,6 +4,7 @@ from hqq.core.quantize import HQQLinear, BaseQuantizeConfig
 from hqq.core.quantize import Quantizer
 
 from gemq.utils.model_utils import *
+from gemq.utils.hf_loading import native_grid_dtype
 
 
 def build_alloc_cfg(model, args):
@@ -59,8 +60,8 @@ class FP32GridLinear(HQQLinear):
 
     def cuda(self, device):
         scale, zero = self.meta["scale"], self.meta["zero"]
-        if scale.dtype != torch.float32 or zero.dtype != torch.float32:
-            raise ValueError("GEMQ requires a stored FP32 scale and zero")
+        if scale.dtype not in (torch.float16, torch.float32) or scale.dtype != zero.dtype:
+            raise ValueError("GEMQ requires matching FP16 or FP32 scales and zeros")
         super().cuda(device)
         self.meta.update(scale=scale.to(device), zero=zero.to(device), compute_dtype=torch.float32)
         return self
@@ -69,8 +70,16 @@ class FP32GridLinear(HQQLinear):
         return Quantizer.dequantize(self.W_q, self.meta).to(self.compute_dtype)
 
 
+def fp16_grid(value):
+    stored = value.to(dtype=torch.float16)
+    if not torch.isfinite(stored).all():
+        raise ValueError("GPTQ grid cannot be stored as finite FP16")
+    return stored
+
+
 def create_hqq_linear_from_quantized_weights(
-    W_q, scale, zero, org_shape, nbits, group_size, bias=None, device="cuda", compute_dtype=None, packed=False
+    W_q, scale, zero, org_shape, nbits, group_size, bias=None, device="cuda", compute_dtype=None, packed=False,
+    fp32_dequant=False,
 ):
     """
     Create a HQQLinear layer from quantized weights without running on-the-fly HQQ quantization.
@@ -80,7 +89,8 @@ def create_hqq_linear_from_quantized_weights(
     # create a dummy HQQLinear layer
     # skip initialization (HQQ quantization) by passing a None linear_layer
     quant_config = BaseQuantizeConfig(nbits, group_size)
-    linear_cls = FP32GridLinear if scale.dtype == zero.dtype == torch.float32 else HQQLinear
+    aligned = fp32_dequant or scale.dtype == zero.dtype == torch.float32
+    linear_cls = FP32GridLinear if aligned else HQQLinear
     quant_layer = linear_cls(None, quant_config, compute_dtype=compute_dtype or W_q.dtype, device=device)
     
 
@@ -89,8 +99,8 @@ def create_hqq_linear_from_quantized_weights(
         "nbits": nbits,
         "group_size": group_size,
         "shape": torch.Size(org_shape),
-        "scale": scale,
-        "zero": zero,
+        "scale": fp16_grid(scale) if aligned else scale,
+        "zero": fp16_grid(zero) if aligned else zero,
         "axis": 1,
         "packing": Quantizer.bit_to_packing[nbits],
         "quant_scale": False,
@@ -172,7 +182,8 @@ def replace_linears(model, model_name, quant_modules, quant_weight=True):
         # Replace with HQQLinear
         device = m.weight.device if m.weight.is_cuda else "cuda"
         hqq_linear = create_hqq_linear_from_quantized_weights(
-            Q, scales, zeros, m.weight.shape, nbits, group_size, bias=m.bias, device=device, compute_dtype=W.dtype, packed=packed
+            Q, scales, zeros, m.weight.shape, nbits, group_size, bias=m.bias, device=device, compute_dtype=W.dtype, packed=packed,
+            fp32_dequant=native_grid_dtype(model.config) is not None,
         )
         setattr_nested(layers, name, hqq_linear)
 

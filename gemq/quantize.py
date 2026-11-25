@@ -19,6 +19,7 @@ from gemq.utils.model_utils import *
 from gemq.utils.quant_utils import *
 from gemq.utils.eval_utils import evaluate_perplexity
 from gemq.utils.hf_loading import (
+    native_grid_dtype,
     align_deepseek_softmax_scale,
     ensure_deepseek_v2_remote_code_compat,
     normalize_legacy_tied_weights_for_serialization,
@@ -65,6 +66,8 @@ def make_gptq_quantizer(weight, name, wbits, args):
     quantizer_cls = (
         MCMoeGPTQWeightQuantizer if args.reproduce_mcmoe else GPTQWeightQuantizer
     )
+    model_type = NAME_TO_MODEL[args.model_name]
+    half_grid = model_type in (ModelType.DEEPSEEKV2, ModelType.QWEN2MOE, ModelType.MIXTRAL)
     return quantizer_cls(
         weight,
         name,
@@ -75,7 +78,8 @@ def make_gptq_quantizer(weight, name, wbits, args):
         args.actorder,
         args.static_groups,
         args.mse,
-        mcmoe_rules=NAME_TO_MODEL[args.model_name] == ModelType.MIXTRAL,
+        mcmoe_rules=model_type == ModelType.MIXTRAL,
+        grid_dtype=torch.float16 if half_grid else torch.float32,
     )
 
 
@@ -191,7 +195,7 @@ def save_quantized_model(model, tokenizer, save_path, save_dtype, real_quant):
     Save the real/pseudo quantized model.
     """
     if real_quant:
-        if getattr(getattr(model, "config", None), "gemq_fp32_grid", False) is True:
+        if native_grid_dtype(getattr(model, "config", None)) is not None:
             model.config.dtype = next(model.parameters()).dtype
         tokenizer.save_pretrained(save_path)
         AutoHQQHFModel.save_quantized(model, save_path)
@@ -275,7 +279,7 @@ def finalize_packed_checkpoint(model, tokenizer, args, resource_ledger):
     parameter = next(model.parameters())
     supported = (model.config.model_type == "qwen3_moe"
                  and parameter.dtype == torch.float16 and parameter.is_cuda
-                 and not getattr(model.config, "gemq_fp32_grid", False))
+                 and native_grid_dtype(model.config) is None)
     backend = ("triton" if supported else "pytorch") if requested == "auto" else requested
     accelerated = bool(args.eval_real_quant and backend == "triton")
     if accelerated and not supported:
@@ -563,8 +567,8 @@ def quantize_weights_gptq(model, dataloader, args):
             if getattr(args, "real_quant", False):
                 packing = Quantizer.bit_to_packing[quantizers[name].nbits]
                 m.gemq_packed_codes = Quantizer.pack[packing](Q).cpu()
-            m.register_buffer("quant_scales", scales)
-            m.register_buffer("quant_zeros", zeros)
+            m.register_buffer("quant_scales", fp16_grid(scales))
+            m.register_buffer("quant_zeros", fp16_grid(zeros))
             m.register_buffer("quant_nbits", torch.tensor(quantizers[name].nbits))
             m.register_buffer("quant_groupsize", torch.tensor(quantizers[name].groupsize))
 
@@ -609,7 +613,7 @@ def quantize_weights_gptq(model, dataloader, args):
 
     model.config.use_cache = use_cache  # restore
 
-    model.config.gemq_fp32_grid = True
+    model.config.gemq_grid_storage_dtype = "float16"
     return quant_modules, fused_packed_states
 
 
@@ -739,7 +743,7 @@ def parse_args():
     )
     parser.add_argument(
         "--reproduce_mcmoe", action="store_true",
-        help="Select the MC-MoE GPTQ solver with FP32 grid arithmetic; Mixtral retains its search and compensation rules"
+        help="Select the MC-MoE GPTQ solver with the model's grid precision; Mixtral retains its search and compensation rules"
     )
 
     # router fine-tuning args

@@ -8,7 +8,7 @@ import pytest
 import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from gemq.utils.hf_loading import normalize_legacy_tied_weights_for_serialization
+from gemq.utils.hf_loading import native_grid_dtype, normalize_legacy_tied_weights_for_serialization
 
 
 def production_save():
@@ -17,7 +17,7 @@ def production_save():
     functions = [node for node in module.body if isinstance(node, ast.FunctionDef)
                  and node.name in ("save_quantized_model", "cast_model_preserving_grid")]
     hqq = SimpleNamespace(save_quantized=Mock())
-    namespace = dict(torch=torch, AutoHQQHFModel=hqq, custom_object_save=Mock(),
+    namespace = dict(native_grid_dtype=native_grid_dtype, torch=torch, AutoHQQHFModel=hqq, custom_object_save=Mock(),
                      normalize_legacy_tied_weights_for_serialization=
                      normalize_legacy_tied_weights_for_serialization)
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)

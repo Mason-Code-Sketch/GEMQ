@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from gemq.utils.eval_utils import LM_EVAL_VERSION, ZEROSHOT_TASKS, run_lm_eval
 from gemq.utils.hf_loading import (
+    native_grid_dtype,
     align_deepseek_softmax_scale, describe_model_impl, load_quantized_model,
 )
 
@@ -151,7 +152,7 @@ def load_model(args):
             device="cpu" if args.layer_devices else args.device,
             trust_remote_code=args.trust_remote_code,
         )
-        if infer_dtype and getattr(model.config, "gemq_fp32_grid", False):
+        if infer_dtype and native_grid_dtype(model.config) is not None:
             stored_dtype = getattr(model.config, "dtype", None) or torch.bfloat16
             args.model_dtype = str(stored_dtype).removeprefix("torch.")
         if args.layer_devices:
@@ -175,7 +176,7 @@ def prepare_backend(model, tokenizer, args):
     supported = (
         not args.is_fp and model.config.model_type == "qwen3_moe"
         and args.device.startswith("cuda") and args.model_dtype == "float16"
-        and not getattr(model.config, "gemq_fp32_grid", False)
+        and native_grid_dtype(model.config) is None
     )
     layerwise = bool(args.layer_devices)
     if args.backend == "grouped_cached" or (args.backend == "auto" and grouped_supported):
