@@ -52,7 +52,8 @@ def test_model_dispatch_covers_uniform_and_mixed_projections():
     tree = ast.parse((Path(__file__).parents[1] / "gemq/quantize.py").read_text())
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "make_gptq_quantizer")
     ns = dict(GPTQWeightQuantizer=GPTQWeightQuantizer, MCMoeGPTQWeightQuantizer=MCMoeGPTQWeightQuantizer,
-              NAME_TO_MODEL={"mixtral": "mixtral", "qwen3": "qwen3"}, ModelType=SimpleNamespace(MIXTRAL="mixtral"))
+              NAME_TO_MODEL={"mixtral": "mixtral", "qwen3": "qwen3"}, torch=torch,
+              ModelType=SimpleNamespace(MIXTRAL="mixtral", DEEPSEEKV2="deepseek", QWEN2MOE="qwen1.5"))
     exec(compile(ast.Module(body=[node], type_ignores=[]), "factory", "exec"), ns)
     for model in ("mixtral", "qwen3"):
         for mcmoe in (True, False):

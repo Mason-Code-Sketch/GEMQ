@@ -18,11 +18,11 @@ def _search_factors(x, mcmoe_rules):
 
 
 class MCMoeGPTQWeightQuantizer(nn.Module):
-    """GPTQ with FP32 parameter arithmetic and the configured MC-MoE rules."""
+    """GPTQ with the configured grid precision and MC-MoE rules."""
 
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
-        groupsize=-1, actorder=False, static_groups=False, mse=True, mcmoe_rules=False,
+        groupsize=-1, actorder=False, static_groups=False, mse=True, mcmoe_rules=False, grid_dtype=torch.float32,
     ):
         super().__init__()
 
@@ -32,6 +32,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             raise ValueError("GPTQ blocksize must be positive and groupsize must be positive or -1")
         if not isinstance(mse, bool):
             raise ValueError("GPTQ mse must be boolean")
+        self.grid_dtype = grid_dtype
         self.name = name
         self.nbits = nbits
         self.groupsize = groupsize
@@ -80,7 +81,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         """
         Find quantization parameters (scales zero-points, and max_int) for a tensor.
         """
-        x = x.float()
+        x = x.to(self.grid_dtype)
 
         max_int = 2 ** self.nbits - 1
         if max_int == 1:
@@ -88,7 +89,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
             zeros = 0.5 * torch.ones_like(scales)
             return scales, zeros, max_int
 
-        tmp = torch.zeros(x.shape[0], 1, dtype=torch.float32, device=x.device)  # (N_filter,1)
+        tmp = torch.zeros(x.shape[0], 1, dtype=x.dtype, device=x.device)  # (N_filter,1)
         min_val = torch.minimum(x.amin(dim=1, keepdim=True), tmp)  # (N_filter,1)
         max_val = torch.maximum(x.amax(dim=1, keepdim=True), tmp)  # (N_filter,1)
         
@@ -102,7 +103,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         if self.mse:
             norm = 2.4
 
-            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=torch.float32)
+            best = torch.full([x.shape[0]], float("inf"), device=x.device, dtype=x.dtype)
             factors = _search_factors(x, self.mcmoe_rules)
             for p in factors:
                 minv = p * min_val
@@ -152,8 +153,8 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
         if self.nbits == 0:
             num_groups = self.W.numel() // self.groupsize if self.groupsize > 0 else self.W.shape[0]
             Q = torch.zeros_like(self.W).reshape(num_groups, -1)
-            scales = torch.ones(num_groups, 1, dtype=torch.float32, device=device)
-            zeros = torch.zeros(num_groups, 1, dtype=torch.float32, device=device)
+            scales = torch.ones(num_groups, 1, dtype=self.grid_dtype, device=device)
+            zeros = torch.zeros(num_groups, 1, dtype=self.grid_dtype, device=device)
             return Q, scales, zeros
         
 
@@ -193,7 +194,7 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
                         zeros_list.append(zeros)
 
                 q = self.quantize_vector(w.unsqueeze(1), scales, zeros, max_int)
-                qr = (q - zeros) * scales  # dequantize
+                qr = (q.float() - zeros) * scales  # Keep GPTQ feedback in the working precision.
 
                 q = q.flatten()
                 qr = qr.flatten()
@@ -231,11 +232,11 @@ class MCMoeGPTQWeightQuantizer(nn.Module):
 
 
 class GPTQWeightQuantizer(nn.Module):
-    """Aligned floating-zero GPTQ retaining native FP32 parameter solving."""
+    """Aligned floating-zero GPTQ with model-specific grid precision."""
 
     def __init__(
         self, x, name="", nbits=4, blocksize=128, percdamp=0.01,
-        groupsize=-1, actorder=False, static_groups=False, mse=True, mcmoe_rules=False,
+        groupsize=-1, actorder=False, static_groups=False, mse=True, mcmoe_rules=False, grid_dtype=torch.float32,
     ):
         super().__init__()
 
@@ -245,6 +246,7 @@ class GPTQWeightQuantizer(nn.Module):
             raise ValueError("GPTQ blocksize must be positive and groupsize must be positive or -1")
         if not isinstance(mse, bool):
             raise ValueError("GPTQ mse must be boolean")
+        self.grid_dtype = grid_dtype
         self.name = name
         self.nbits = nbits
         self.groupsize = groupsize
@@ -291,7 +293,7 @@ class GPTQWeightQuantizer(nn.Module):
         """
         Find quantization parameters (scales zero-points, and max_int) for a tensor.
         """
-        x = x.float()
+        x = x.to(self.grid_dtype)
         max_int = 2 ** self.nbits - 1
         if max_int == 1:
             scales = torch.mean(torch.abs(x), dim=1, keepdim=True) * 2
@@ -363,8 +365,8 @@ class GPTQWeightQuantizer(nn.Module):
         if self.nbits == 0:
             num_groups = self.W.numel() // self.groupsize if self.groupsize > 0 else self.W.shape[0]
             Q = torch.zeros_like(self.W).reshape(num_groups, -1)
-            scales = torch.ones(num_groups, 1, dtype=torch.float32, device=device)
-            zeros = torch.zeros(num_groups, 1, dtype=torch.float32, device=device)
+            scales = torch.ones(num_groups, 1, dtype=self.grid_dtype, device=device)
+            zeros = torch.zeros(num_groups, 1, dtype=self.grid_dtype, device=device)
             return Q, scales, zeros
         
         
@@ -403,7 +405,7 @@ class GPTQWeightQuantizer(nn.Module):
                         zeros_list.append(zeros)
 
                 q = self.quantize_vector(w.unsqueeze(1), scales, zeros, max_int)
-                qr = (q - zeros) * scales  # dequantize
+                qr = (q.float() - zeros) * scales  # Keep GPTQ feedback in the working precision.
 
                 q = q.flatten()
                 qr = qr.flatten()

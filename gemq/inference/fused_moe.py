@@ -8,6 +8,7 @@ from hqq.core.quantize import HQQLinear
 from hqq.models.hf.base import AutoHQQHFModel
 from transformers.activations import ACT2FN
 
+from gemq.utils.hf_loading import native_grid_dtype
 from gemq.utils.quant_utils import FP32GridLinear, create_hqq_linear_from_quantized_weights
 
 
@@ -35,6 +36,7 @@ def hqq_state_from_quantized_weight(
         nbits,
         groupsize,
         device=device,
+        fp32_dequant=True,
     )
     try:
         return hqq_state_to_cpu(hqq_linear)
@@ -42,9 +44,12 @@ def hqq_state_from_quantized_weight(
         del hqq_linear
 
 
-def hqq_linear_from_state(state, device, compute_dtype):
+def hqq_linear_from_state(state, device, compute_dtype, *, grid_dtype=None):
     """Restore one HQQLinear from a state dictionary produced by HQQ serialization."""
-    linear_cls = FP32GridLinear if state["scale"].dtype == torch.float32 else HQQLinear
+    if grid_dtype is not None and any(state[k].dtype != grid_dtype for k in ("scale", "zero")):
+        raise ValueError("packed GEMQ grid differs from its recorded storage dtype")
+    aligned = grid_dtype is not None or state["scale"].dtype == torch.float32
+    linear_cls = FP32GridLinear if aligned else HQQLinear
     hqq_linear = linear_cls(
         linear_layer=None,
         quant_config=None,
@@ -117,6 +122,7 @@ class HQQFusedMoeExperts(nn.Module):
                         state,
                         device=device,
                         compute_dtype=source_weight.dtype,
+                        grid_dtype=native_grid_dtype(config),
                     )
                 getattr(packed_experts, projection_name)[expert_id] = packed_linear
 

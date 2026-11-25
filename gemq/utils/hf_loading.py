@@ -138,8 +138,17 @@ def force_remote_code():
             cls.from_config = original
 
 
-def _load_fp32_grid_model(loader, path, dtype, device):
-    """Use HQQ's model layout and saved state with full-precision packed linears."""
+def native_grid_dtype(config):
+    """Storage precision for GEMQ checkpoints that reconstruct weights in FP32."""
+    if getattr(config, "gemq_grid_storage_dtype", None) == "float16":
+        return torch.float16
+    if getattr(config, "gemq_fp32_grid", False) is True:
+        return torch.float32
+    return None
+
+
+def _load_grid_model(loader, path, dtype, device, grid_dtype):
+    """Use HQQ's model layout and saved state with the recorded grid precision."""
     from gemq.inference.fused_moe import hqq_linear_from_state
 
     model = loader.create_model(path, {})
@@ -152,7 +161,7 @@ def _load_fp32_grid_model(loader, path, dtype, device):
         if state is None:
             return module.to(device=device, dtype=dtype)
         if "W_q" in state:
-            return hqq_linear_from_state(state, device, dtype)
+            return hqq_linear_from_state(state, device, dtype, grid_dtype=grid_dtype)
         for name, value in state.items():
             target = value.to(device=device, dtype=dtype if value.is_floating_point() else value.dtype)
             setattr(module, name, torch.nn.Parameter(target, requires_grad=False))
@@ -189,9 +198,10 @@ def load_quantized_model(
                 or getattr(config, FUSED_HQQ_EXPERTS_CONFIG_KEY, False))
             else AutoHQQHFModel
         )
-        if getattr(config, "gemq_fp32_grid", False):
+        grid_dtype = native_grid_dtype(config)
+        if grid_dtype is not None:
             dtype = compute_dtype or getattr(config, "dtype", None) or torch.bfloat16
-            model = _load_fp32_grid_model(hqq_model_cls, model_path, dtype, device)
+            model = _load_grid_model(hqq_model_cls, model_path, dtype, device, grid_dtype)
         else:
             model = hqq_model_cls.from_quantized(
                 model_path, compute_dtype=compute_dtype or torch.float16, device=device

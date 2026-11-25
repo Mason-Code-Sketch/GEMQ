@@ -12,6 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from gemq.inference.kv_cache import StaticCache
 from gemq.inference.patch import prepare_for_inference
 from gemq.utils.hf_loading import (
+    native_grid_dtype,
     load_quantized_model, describe_model_impl, align_deepseek_softmax_scale,
 )
 
@@ -104,7 +105,7 @@ def load_model(args, compute_dtype=None, device="cuda"):
     # patch model for inference
     if args.compile:
         print("Patching model for inference ...")
-        if getattr(model.config, "gemq_fp32_grid", False) and not args.is_fp:
+        if native_grid_dtype(model.config) is not None and not args.is_fp:
             from gemq.inference.cached_linear import cache_quantized_linears
             cache_quantized_linears(model)
         else:

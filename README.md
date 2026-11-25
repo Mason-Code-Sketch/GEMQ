@@ -212,7 +212,7 @@ the repository root. Allocation filenames retain the full bit budget, including
 
 ### Packed PPL backend
 
-New checkpoints store GPTQ scale and zero in FP32 and decode in FP32 before rounding to the model dtype.
+DeepSeek-V2-Lite, Qwen1.5-MoE and Mixtral solve GPTQ scale and zero in FP16. Qwen3-MoE solves them in FP32. New checkpoints store both tensors in FP16 and decode in FP32 before rounding to the model dtype. Existing FP32-grid checkpoints retain their original storage precision on load.
 Scoring uses group-wise floating-zero RTN with an error search at 2 and 3 bits.
 Packed PPL uses `--packed_ppl_backend auto` by default: legacy Qwen3 FP16 on CUDA
 uses the fused Triton expert path; other configurations use native HQQ.
