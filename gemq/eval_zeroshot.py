@@ -59,7 +59,7 @@ def parse_args(argv=None):
     parser.add_argument("--layer-devices", nargs="+", metavar="CUDA_DEVICE",
                         help="Distribute packed FP16/BF16 DeepSeek, Qwen1.5, Qwen3 or Mixtral decoder layers "
                              "over the listed CUDA devices and cache decoded weights")
-    parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default="float16")
+    parser.add_argument("--model_dtype", choices=("float16", "bfloat16", "float32"), default=None)
     parser.add_argument("--backend", choices=("auto", "pytorch", "cached", "grouped_cached", "triton"), default="auto",
                         help="auto selects resident grouped_mm for the four supported FP16/BF16 MoE families; "
                              "triton explicitly requests GEMQ fused kernels")
@@ -74,6 +74,9 @@ def parse_args(argv=None):
     parser.add_argument("--limit", type=positive_int, help="Terminal-only check: examples per leaf task")
     parser.add_argument("--output", type=Path, help="New JSON path; defaults to MODEL_PATH/zeroshot.json")
     args = parser.parse_args(argv)
+    args._infer_model_dtype = args.model_dtype is None
+    if args._infer_model_dtype:
+        args.model_dtype = "bfloat16" if args.is_fp else "float16"
     args._max_batch_size_explicit = args.max_batch_size is not None
     if args.max_batch_size is None:
         args.max_batch_size = {"seven": 51, "mmlu_5shot": 17, "gsm8k_5shot": 96}[args.evaluation]
@@ -142,10 +145,15 @@ def load_model(args):
             trust_remote_code=args.trust_remote_code,
         )
     else:
+        infer_dtype = getattr(args, "_infer_model_dtype", False)
         model = load_quantized_model(
-            str(args.model_path), compute_dtype=dtype, device="cpu" if args.layer_devices else args.device,
+            str(args.model_path), compute_dtype=None if infer_dtype else dtype,
+            device="cpu" if args.layer_devices else args.device,
             trust_remote_code=args.trust_remote_code,
         )
+        if infer_dtype and getattr(model.config, "gemq_fp32_grid", False):
+            stored_dtype = getattr(model.config, "dtype", None) or torch.bfloat16
+            args.model_dtype = str(stored_dtype).removeprefix("torch.")
         if args.layer_devices:
             from gemq.inference.layerwise import distribute_packed_model
             model = distribute_packed_model(model, args.layer_devices)
@@ -167,6 +175,7 @@ def prepare_backend(model, tokenizer, args):
     supported = (
         not args.is_fp and model.config.model_type == "qwen3_moe"
         and args.device.startswith("cuda") and args.model_dtype == "float16"
+        and not getattr(model.config, "gemq_fp32_grid", False)
     )
     layerwise = bool(args.layer_devices)
     if args.backend == "grouped_cached" or (args.backend == "auto" and grouped_supported):

@@ -70,106 +70,68 @@ class RTNWeightQuantizer(nn.Module):
         return W_q
 
 
+
+
+def _candidate(group, bit, factors):
+    if bit == 1:
+        scale = 2 * group.abs().mean(dim=1, keepdim=True)
+        return ((group >= 0).float() - 0.5) * scale
+    maximum = 2**bit - 1
+    low = group.amin(dim=1, keepdim=True).clamp_max(0)
+    high = group.amax(dim=1, keepdim=True).clamp_min(0)
+    high = torch.where((low == 0) & (high == 0), maximum, high)
+    best_error = torch.full_like(low, float("inf"))
+    best_scale = (high - low) / maximum
+    best_zero = -low / best_scale
+    for factor in factors:
+        lower = factor * low
+        scale = (factor * high - lower) / maximum
+        zero = -lower / scale
+        levels = (group / scale + zero).round().clamp_(0, maximum)
+        error = ((levels - zero) * scale - group).abs_().pow_(2.4).sum(dim=1, keepdim=True)
+        improved = error < best_error
+        best_error = torch.where(improved, error, best_error)
+        best_scale = torch.where(improved, scale, best_scale)
+        best_zero = torch.where(improved, zero, best_zero)
+    levels = (group / best_scale + best_zero).round().clamp_(0, maximum)
+    return (levels - best_zero) * best_scale
+
+
+@torch.no_grad()
+def normal_quantize(w, blocksize=128, wbit=2, *, mcmoe_rules=False):
+    """Search each row and input-column group independently, including a short tail."""
+    if wbit == 0:
+        return torch.zeros_like(w)
+    if blocksize <= 0 or not 1 <= wbit <= 8 or w.ndim != 2:
+        raise ValueError("RTN requires a matrix, a positive group size and 1..8 bits")
+    factors = [1 - i / 100 for i in range(80)]
+    if mcmoe_rules and wbit > 1:
+        factors = torch.cat((w.new_ones(1, dtype=torch.float32),
+                             torch.linspace(1, 1.1, 51, device=w.device, dtype=torch.float32)[1:],
+                             torch.linspace(1, 0.9, 51, device=w.device, dtype=torch.float32)[1:]))
+    rows, columns = w.shape
+    full = columns - columns % blocksize
+    result = torch.empty_like(w)
+    chunk = max(1, (8 * 1024 * 1024) // columns)
+    for start in range(0, rows, chunk):
+        for left, right, width in ((0, full, blocksize), (full, columns, columns - full)):
+            if left == right:
+                continue
+            source = w[start:start + chunk, left:right]
+            group = source.reshape(-1, width).float()
+            result[start:start + chunk, left:right] = _candidate(group, wbit, factors).reshape_as(source)
+    return result
+
+
 class MCMoeRTNWeightQuantizer(nn.Module):
-    def __init__(self, x, nbits, blocksize=128):
+    def __init__(self, x, nbits, blocksize=128, *, mcmoe_rules=False):
         super().__init__()
-        
         self.x = x.clone()
         self.nbits = nbits
         self.blocksize = blocksize
+        self.mcmoe_rules = mcmoe_rules
 
-    @classmethod
-    def binary(cls, x):
-        scale_tensor = torch.mean(torch.abs(x), dim=1) * 2
-        zero = 0.5 * torch.ones_like(scale_tensor)
-        x_ = torch.zeros_like(x)
-        x_ += x
-        binary_slice = torch.where(x_ >= 0, 1, -1)
-        binary_slice = binary_slice/2 + 0.5
-
-        scale_tensor = scale_tensor.unsqueeze(1).expand(-1, 128)
-        zero = zero.unsqueeze(1).expand(-1, 128)
-        return scale_tensor * (binary_slice - zero)
-
-    @classmethod
-    def __quantize(cls, x, scale, zero, maxq):
-        q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
-        return scale * (q - zero)
-
-    @classmethod
-    def _quantize(cls, w, wbit):
-        perchannel = True
-        weight = True
-        dev = w.device
-        maxq = torch.tensor(2 ** wbit - 1)
-        scale = torch.zeros(1)
-        zero = torch.zeros(1)
-        if dev != scale.device:
-            scale=scale.to(dev)
-            zero=zero.to(dev)
-            maxq=maxq.to(dev)
-
-        x = w.clone()
-        shape = x.shape
-
-        if perchannel:
-            if weight:
-                x = x.flatten(1)
-            else:
-                if len(shape) == 4:
-                    x = x.permute([1, 0, 2, 3])
-                    x = x.flatten(1)
-                if len(shape) == 3:
-                    x = x.reshape((-1, shape[-1])).t()
-                if len(shape) == 2:
-                    x = x.t()
-        else:
-            x = x.flatten().unsqueeze(0)
-        tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
-
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin[tmp] = -1
-        xmax[tmp] = +1
-        scale = (xmax - xmin) / maxq
-        zero = torch.round(-xmin / scale)
-        if not perchannel:
-            if weight:
-                tmp = shape[0]
-            else:
-                tmp = shape[1] if len(shape) != 3 else shape[2]
-            scale = scale.repeat(tmp)
-            zero = zero.repeat(tmp)
-
-        if weight:
-            shape = [-1] + [1] * (len(shape) - 1)
-            scale = scale.reshape(shape)
-            zero = zero.reshape(shape)
-        w = cls.__quantize(w, scale, zero, maxq)
-
-        return w
-
-    @classmethod
-    def normal_quantize(cls, w, blocksize=128, wbit=2):
-        columns = w.shape[1]
-        w_q = torch.zeros_like(w)
-        w_q = w_q.to(w.device)
-        for i1 in range(0, columns, blocksize):
-            i2 = min(i1 + blocksize, columns)
-            count = i2 - i1
-
-            W1 = w[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            if wbit == 1:
-                Q1 = cls.binary(W1)
-            else:
-                Q1 = cls._quantize(W1, wbit)
-            
-            w_q[:, i1:i2] = Q1
-        return w_q
+    normal_quantize = staticmethod(normal_quantize)
 
     def quantize(self):
-        if self.nbits == 0:
-            return torch.zeros_like(self.x)
-        return MCMoeRTNWeightQuantizer.normal_quantize(self.x, self.blocksize, self.nbits)
+        return self.normal_quantize(self.x, self.blocksize, self.nbits, mcmoe_rules=self.mcmoe_rules)

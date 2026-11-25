@@ -212,7 +212,9 @@ the repository root. Allocation filenames retain the full bit budget, including
 
 ### Packed PPL backend
 
-Packed PPL uses `--packed_ppl_backend auto` by default: Qwen3 FP16 on CUDA
+New checkpoints store GPTQ scale and zero in FP32 and decode in FP32 before rounding to the model dtype.
+Scoring uses group-wise floating-zero RTN with an error search at 2 and 3 bits.
+Packed PPL uses `--packed_ppl_backend auto` by default: legacy Qwen3 FP16 on CUDA
 uses the fused Triton expert path; other configurations use native HQQ.
 Use `--packed_ppl_backend pytorch` for the native HQQ reference. The fused
 path can introduce floating-point differences. Its native HQQ checkpoint is

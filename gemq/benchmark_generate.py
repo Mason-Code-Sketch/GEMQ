@@ -65,14 +65,14 @@ def decode_n_tokens(model, cur_token, kv_cache, input_pos, num_new_tokens, **sam
     return new_tokens
 
 
-def load_model(args, compute_dtype=torch.float16, device="cuda"):
+def load_model(args, compute_dtype=None, device="cuda"):
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
 
     if args.is_fp:
         model = AutoModelForCausalLM.from_pretrained(
-            args.model_path, dtype=compute_dtype, device_map=device,
+            args.model_path, dtype=compute_dtype or torch.bfloat16, device_map=device,
             trust_remote_code=args.trust_remote_code
         )
     else:
@@ -104,7 +104,11 @@ def load_model(args, compute_dtype=torch.float16, device="cuda"):
     # patch model for inference
     if args.compile:
         print("Patching model for inference ...")
-        prepare_for_inference(model, args.model_name, is_fp=args.is_fp)
+        if getattr(model.config, "gemq_fp32_grid", False) and not args.is_fp:
+            from gemq.inference.cached_linear import cache_quantized_linears
+            cache_quantized_linears(model)
+        else:
+            prepare_for_inference(model, args.model_name, is_fp=args.is_fp)
 
     model = model.eval()
     return model, tokenizer
@@ -166,13 +170,12 @@ def main(args):
 
     # NOTE: only supports single GPU inference for now
     device = "cuda"
-    compute_dtype = torch.float16
-    print(f"Using device={device}, dtype={compute_dtype}")
+    print(f"Using device={device}")
     
     # load and patch model
     print("Loading model ...")
     t0 = time.time()
-    model, tokenizer = load_model(args, compute_dtype, device)
+    model, tokenizer = load_model(args, device=device)
     device_sync()
     print(f"Time to load model: {time.time() - t0:.02f} seconds")
 

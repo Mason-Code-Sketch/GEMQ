@@ -138,8 +138,35 @@ def force_remote_code():
             cls.from_config = original
 
 
+def _load_fp32_grid_model(loader, path, dtype, device):
+    """Use HQQ's model layout and saved state with full-precision packed linears."""
+    from gemq.inference.fused_moe import hqq_linear_from_state
+
+    model = loader.create_model(path, {})
+    model.save_dir = path
+    loader.setup_model(model)
+    weights = loader.load_weights(path, device)
+
+    def restore(module, params=None):
+        state = weights.get(module.name)
+        if state is None:
+            return module.to(device=device, dtype=dtype)
+        if "W_q" in state:
+            return hqq_linear_from_state(state, device, dtype)
+        for name, value in state.items():
+            target = value.to(device=device, dtype=dtype if value.is_floating_point() else value.dtype)
+            setattr(module, name, torch.nn.Parameter(target, requires_grad=False))
+        return module
+
+    loader.patch_model(model, restore, restore, dict.fromkeys(model.linear_tags))
+    loader.post_module_load(model, weights)
+    model.hqq_quantized = True
+    model.base_class = loader
+    return model
+
+
 def load_quantized_model(
-    model_path, compute_dtype=torch.float16, device="cuda", trust_remote_code=True
+    model_path, compute_dtype=None, device="cuda", trust_remote_code=True
 ):
     """Load a real-quant checkpoint, honouring the modeling code shipped inside it."""
     from hqq.models.hf.base import AutoHQQHFModel
@@ -162,9 +189,13 @@ def load_quantized_model(
                 or getattr(config, FUSED_HQQ_EXPERTS_CONFIG_KEY, False))
             else AutoHQQHFModel
         )
-        model = hqq_model_cls.from_quantized(
-            model_path, compute_dtype=compute_dtype, device=device
-        )
+        if getattr(config, "gemq_fp32_grid", False):
+            dtype = compute_dtype or getattr(config, "dtype", None) or torch.bfloat16
+            model = _load_fp32_grid_model(hqq_model_cls, model_path, dtype, device)
+        else:
+            model = hqq_model_cls.from_quantized(
+                model_path, compute_dtype=compute_dtype or torch.float16, device=device
+            )
     install_deepseek_generation_cache_compat(model)
     return model
 

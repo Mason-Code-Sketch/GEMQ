@@ -135,7 +135,7 @@ def get_stats(model, enc, args):
         if has_fused_experts(moe_block):
             bit_cfg = list(map(int, args.wbits.split(",")))
             quant_loss[i] = compute_fused_moe_quantization_losses(
-                moe_block, block_inps, block_outs, bit_cfg
+                moe_block, block_inps, block_outs, bit_cfg, mcmoe_rules=model_type == ModelType.MIXTRAL
             )
             layers[i] = layer.to("cpu")
             gc.collect()
@@ -155,7 +155,9 @@ def get_stats(model, enc, args):
                 quantizers[e][b] = {}
                 for l, lname in enumerate(sublinear_names):
                     m = named_linears[f"{expert_name}.{lname}"]
-                    quantizers[e][b][l] = MCMoeRTNWeightQuantizer(m.weight.data, nbits=b)
+                    quantizers[e][b][l] = MCMoeRTNWeightQuantizer(
+                        m.weight.data, nbits=b, mcmoe_rules=model_type == ModelType.MIXTRAL
+                    )
 
         # compute reconstruction loss of block output caused by quantization (i.e., perturbation)
         layer_quant_loss = defaultdict(dict)
@@ -286,6 +288,7 @@ def compute_fused_moe_layer_reconstruction_errors(
     layer_sq_grads,
     bit_cfg,
     forward_batch_size,
+    *, mcmoe_rules=False,
 ):
     """Score routed and optional shared experts in the native fused layout."""
     layer_quant_loss = defaultdict(dict)
@@ -309,17 +312,17 @@ def compute_fused_moe_layer_reconstruction_errors(
             try:
                 if expert_id == num_routed_experts:
                     quantized_weights = [
-                        MCMoeRTNWeightQuantizer(weight, nbits=bitwidth).quantize()
+                        MCMoeRTNWeightQuantizer(weight, nbits=bitwidth, mcmoe_rules=mcmoe_rules).quantize()
                         for weight in original_weights
                     ]
                     for module, quantized_weight in zip(modules, quantized_weights):
                         module.weight.copy_(quantized_weight)
                 else:
                     quantized_gate_up = MCMoeRTNWeightQuantizer(
-                        original_weights[0], nbits=bitwidth
+                        original_weights[0], nbits=bitwidth, mcmoe_rules=mcmoe_rules
                     ).quantize()
                     quantized_down = MCMoeRTNWeightQuantizer(
-                        original_weights[1], nbits=bitwidth
+                        original_weights[1], nbits=bitwidth, mcmoe_rules=mcmoe_rules
                     ).quantize()
                     moe_block.experts.gate_up_proj[expert_id].copy_(quantized_gate_up)
                     moe_block.experts.down_proj[expert_id].copy_(quantized_down)
@@ -347,7 +350,8 @@ def compute_fused_moe_layer_reconstruction_errors(
 
 @torch.inference_mode()
 def compute_fused_moe_quantization_losses(
-    moe_block, block_inps, block_outs, bit_cfg
+    moe_block, block_inps, block_outs, bit_cfg,
+    *, mcmoe_rules=False,
 ):
     """Compute MC-MoE-style output losses for native fused experts."""
     layer_quant_loss = defaultdict(dict)
@@ -371,7 +375,7 @@ def compute_fused_moe_quantization_losses(
             try:
                 if expert_id == num_routed_experts:
                     quantized_weights = [
-                        MCMoeRTNWeightQuantizer(weight, nbits=bitwidth).quantize()
+                        MCMoeRTNWeightQuantizer(weight, nbits=bitwidth, mcmoe_rules=mcmoe_rules).quantize()
                         for weight in original_weights
                     ]
                     for module, quantized_weight in zip(modules, quantized_weights):
@@ -379,12 +383,12 @@ def compute_fused_moe_quantization_losses(
                 else:
                     moe_block.experts.gate_up_proj[expert_id].copy_(
                         MCMoeRTNWeightQuantizer(
-                            original_weights[0], nbits=bitwidth
+                            original_weights[0], nbits=bitwidth, mcmoe_rules=mcmoe_rules
                         ).quantize()
                     )
                     moe_block.experts.down_proj[expert_id].copy_(
                         MCMoeRTNWeightQuantizer(
-                            original_weights[1], nbits=bitwidth
+                            original_weights[1], nbits=bitwidth, mcmoe_rules=mcmoe_rules
                         ).quantize()
                     )
 
@@ -524,7 +528,7 @@ def compute_faster_layer_re(model, dataloader, args):
                 block_outs,
                 layer_sq_grads,
                 bit_cfg,
-                fwd_bsz,
+                fwd_bsz, mcmoe_rules=model_type == ModelType.MIXTRAL,
             )
             inps, outs = outs, inps
             layers[i] = layer.to("cpu")
@@ -544,7 +548,9 @@ def compute_faster_layer_re(model, dataloader, args):
                 quantizers[e][b] = {}
                 for l, lname in enumerate(sublinear_names):
                     m = named_linears[f"{expert_name}.{lname}"]
-                    quantizers[e][b][l] = MCMoeRTNWeightQuantizer(m.weight.data, nbits=b)
+                    quantizers[e][b][l] = MCMoeRTNWeightQuantizer(
+                        m.weight.data, nbits=b, mcmoe_rules=model_type == ModelType.MIXTRAL
+                    )
 
         # compute reconstruction errors of block output caused by quantization (perturbation)
         layer_sq_grads = layer_output_grads[i].squeeze(1).double().pow(2).to("cuda")  # (nsamples, seqlen, hidden_size)
@@ -620,7 +626,7 @@ def parse_args():
         help="Name of the model; used to load model-specific modules",
     )
     parser.add_argument(
-        "--model_dtype", type=str, default="float16", choices=["float16", "bfloat16"],
+        "--model_dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"],
         help="Data type of the model weights",
     )
     parser.add_argument(

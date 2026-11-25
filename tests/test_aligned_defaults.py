@@ -12,7 +12,7 @@ def test_floating_grid_search_and_dead_columns(cls):
     scales, zeros, _ = quantizer.find_params(weight.float())
     assert quantizer.mse
     assert bool((zeros != zeros.round()).any())
-    assert scales.dtype == (torch.float16 if cls is MCMoeGPTQWeightQuantizer else torch.float32)
+    assert scales.dtype == torch.float32
     assert .21 <= float(scales[0] / (11 / 3)) <= 1
     codes, scales, zeros = quantizer.quantize()
     assert torch.count_nonzero(quantizer.dequantize(codes, scales, zeros)).item() > 0

@@ -8,7 +8,7 @@ from hqq.core.quantize import HQQLinear
 from hqq.models.hf.base import AutoHQQHFModel
 from transformers.activations import ACT2FN
 
-from gemq.utils.quant_utils import create_hqq_linear_from_quantized_weights
+from gemq.utils.quant_utils import FP32GridLinear, create_hqq_linear_from_quantized_weights
 
 
 QWEN2_HQQ_EXPERTS_CONFIG_KEY = "gemq_qwen2_hqq_experts"
@@ -44,7 +44,8 @@ def hqq_state_from_quantized_weight(
 
 def hqq_linear_from_state(state, device, compute_dtype):
     """Restore one HQQLinear from a state dictionary produced by HQQ serialization."""
-    hqq_linear = HQQLinear(
+    linear_cls = FP32GridLinear if state["scale"].dtype == torch.float32 else HQQLinear
+    hqq_linear = linear_cls(
         linear_layer=None,
         quant_config=None,
         compute_dtype=compute_dtype,
@@ -111,7 +112,7 @@ class HQQFusedMoeExperts(nn.Module):
                     )
                     packed_linear.weight.copy_(source_weight)
                 else:
-                    device = source_weight.device if source_weight.is_cuda else "cuda"
+                    device = source_weight.device if source_weight.is_cuda or not torch.cuda.is_available() else "cuda"
                     packed_linear = hqq_linear_from_state(
                         state,
                         device=device,
